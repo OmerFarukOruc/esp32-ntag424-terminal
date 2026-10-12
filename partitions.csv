@@ -1,0 +1,4 @@
+# Name,   Type, SubType, Offset, Size,     Flags
+# Offsets are blank: gen_esp32part places each entry after the previous one.
+nvs,      data, nvs,     ,       0x6000,
+factory,  app,  factory, ,       0x300000,

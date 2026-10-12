@@ -1,0 +1,36 @@
+# ESP32-S3 default configuration
+# See: https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-reference/kconfig-reference.html
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 8 MB flash (ESP32-S3-DevKitC-1) with the custom table in partitions.csv
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# NVS is stored unencrypted. WiFi credentials, BLE bonds and counters are
+# readable from the flash chip. Flash encryption and NVS encryption are both off.
+
+# BLE onboarding (NimBLE peripheral only)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+# Bonds are stored in NVS
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# Pairing uses LE Secure Connections only; legacy pairing is not offered
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_SM_LEGACY=n
+
+# Two SNTP servers (hal_time sets a primary and a secondary)
+CONFIG_LWIP_SNTP_MAX_SERVERS=2
+
+# 1 kHz tick: pn532.c uart_rx divides its millisecond timeouts by the tick period, so the 10 ms frame timeouts become 20 ms at 100 Hz
+CONFIG_FREERTOS_HZ=1000
+
+# Task watchdog: a stalled subscribed or idle task for 10 s resets the chip
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_PANIC=y

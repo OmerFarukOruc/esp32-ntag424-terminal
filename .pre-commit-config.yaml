@@ -1,0 +1,92 @@
+# Hook choices follow ESP-IDF v6.1's own .pre-commit-config.yaml.
+# Install with: pre-commit install
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: ['-f=lf']
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-executables-have-shebangs
+      - id: check-added-large-files
+
+  - repo: https://github.com/espressif/astyle_py.git
+    rev: v1.1.0
+    hooks:
+      - id: astyle_py
+        # Same astyle version and options as ESP-IDF v6.1 tools/ci/astyle-rules.yml
+        args:
+          - --astyle-version=3.4.7
+          - --style=otbs
+          - --attach-namespaces
+          - --attach-classes
+          - --indent=spaces=4
+          - --convert-tabs
+          - --align-reference=name
+          - --keep-one-line-statements
+          - --pad-header
+          - --pad-oper
+          - --unpad-paren
+          - --max-continuation-indent=120
+
+  - repo: https://github.com/espressif/check-copyright/
+    rev: v1.1.2
+    hooks:
+      - id: check-copyright
+        args: ['--config', 'tools/ci/check_copyright_config.yaml']
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.9.0.5
+    hooks:
+      - id: shellcheck
+        args: ['--shell', 'bash', '-x']
+
+  - repo: https://github.com/espressif/esp-idf-kconfig.git
+    rev: v3.10.0
+    hooks:
+      - id: check-kconfig-files
+      - id: check-deprecated-kconfig-options
+
+  - repo: https://github.com/espressif/conventional-precommit-linter
+    rev: v1.11.0
+    hooks:
+      - id: conventional-precommit-linter
+        stages: [commit-msg]
+        args:
+          - --types=build,chore,ci,docs,feat,fix,perf,refactor,revert,style,test
+          - --subject-min-length=10
+          - --allow-breaking
+
+  - repo: local
+    hooks:
+      - id: cmake-lint
+        name: Check CMake files format
+        entry: cmakelint --linelength=120 --spaces=4 --filter=-whitespace/indent
+        language: python
+        additional_dependencies:
+          - cmakelint==1.4.1
+        files: 'CMakeLists.txt$|\.cmake$'
+      - id: idf-build
+        name: idf.py build
+        entry: scripts/build.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

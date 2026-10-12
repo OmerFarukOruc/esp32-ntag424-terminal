@@ -1,0 +1,35 @@
+menu "HAL button"
+
+    config HAL_BUTTON_GPIO
+        int "Button GPIO"
+        range 0 SOC_GPIO_IN_RANGE_MAX
+        default 4
+        help
+            GPIO that the button connects to. The default wiring is the
+            button between this GPIO and GND with the internal pull-up.
+
+    config HAL_BUTTON_ACTIVE_LOW
+        bool "Button reads low when pressed"
+        default y
+        help
+            Enable for a button wired to GND. Disable for a button wired to
+            the supply, which needs an external pull-down.
+
+    config HAL_BUTTON_INTERNAL_PULLUP
+        bool "Enable the internal pull-up"
+        depends on HAL_BUTTON_ACTIVE_LOW
+        default y
+        help
+            Disable this when the board has an external pull resistor. The
+            pull-up holds the line high, so it is offered only with the
+            low-when-pressed polarity above.
+
+    config HAL_BUTTON_DEBOUNCE_MS
+        int "Debounce time (ms)"
+        range 10 500
+        default 50
+        help
+            The level must stay stable this long after an edge before the
+            press or release counts.
+
+endmenu

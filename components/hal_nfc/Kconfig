@@ -1,0 +1,45 @@
+menu "HAL NFC"
+
+    config HAL_NFC_UART_NUM
+        int "UART port connected to the PN532"
+        range 1 2
+        default 1
+        help
+            UART port that drives the PN532 in HSU mode. UART0 stays free for
+            the console.
+
+    config HAL_NFC_TX_GPIO
+        int "GPIO for ESP32 TX (PN532 RX)"
+        range 0 SOC_GPIO_OUT_RANGE_MAX
+        default 17
+        help
+            GPIO that carries data from the ESP32 to the PN532 RX pin.
+
+    config HAL_NFC_RX_GPIO
+        int "GPIO for ESP32 RX (PN532 TX)"
+        range 0 SOC_GPIO_IN_RANGE_MAX
+        default 18
+        help
+            GPIO that carries data from the PN532 TX pin to the ESP32.
+
+    config HAL_NFC_SDM_BASE_URL
+        string "SDM base URL"
+        default "https://example.com/tap"
+        help
+            URL prefix written into the NTAG424 DNA NDEF file. The terminal
+            appends "/<device_id>?picc_data=<32 hex>&cmac=<16 hex>" and lets the
+            tag fill the placeholders through Secure Dynamic Messaging. The
+            backend that receives the tap must serve this path. Do not end the
+            value with a slash. The value may be at most 139 characters so the
+            whole NDEF file fits one DESFire WriteData frame; the build fails
+            when it is longer.
+
+            Key limitation: the terminal authenticates with, and leaves in
+            place, the factory all-zero AES-128 keys (key 0 and the SDM file
+            read key). It never calls ChangeKey, because an interrupted key
+            change can lock a tag for good. Anyone who knows this firmware can
+            therefore decrypt picc_data and compute a valid cmac, so SDM proves
+            only that a tap happened, not that a genuine tag produced it. A tag
+            whose key 0 was changed cannot be configured by this firmware.
+
+endmenu

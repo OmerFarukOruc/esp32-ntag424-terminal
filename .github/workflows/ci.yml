@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - run: pip install pre-commit==4.6.2
+      # The gitleaks hook scans staged changes only, so nothing is staged in CI.
+      # The gitleaks job below scans the full history instead.
+      - run: pre-commit run --all-files --show-diff-on-failure
+        env:
+          SKIP: gitleaks
+
+  gitleaks:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Scan the full history
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -sSfL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose
+
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container:
+      image: espressif/idf:v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          fetch-depth: 0
+      # The workspace is owned by another user than the container's; git describe sets the firmware version.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: . "$IDF_PATH/export.sh" && idf.py build
+      - name: Check that the build left dependencies.lock unchanged
+        run: git diff --exit-code dependencies.lock
+      # merge-bin depends on the all target, so it builds the firmware first.
+      - name: Merge the release image
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: . "$IDF_PATH/export.sh" && idf.py merge-bin -o "esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin"
+      # The firmware links the GPL-3.0 PN532 library, so the release carries the
+      # complete source including the submodule, which GitHub's tag archive omits.
+      - name: Collect the release files
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir dist
+          git ls-files -z --recurse-submodules \
+            | tar --null -T - --transform "s,^,esp32-ntag424-terminal-${GITHUB_REF_NAME}/," \
+                -czf "dist/esp32-ntag424-terminal-${GITHUB_REF_NAME}-source.tar.gz"
+          cp "build/esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin" build/esp32-ntag424-terminal.elf dist/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: firmware
+          path: |
+            build/*.bin
+            build/*.elf
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flasher_args.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: release
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [pre-commit, gitleaks, build]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          (cd dist && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS")
+          mv "$RUNNER_TEMP/SHA256SUMS" dist/
+          flags=(--verify-tag --generate-notes)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" dist/*

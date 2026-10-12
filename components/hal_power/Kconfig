@@ -1,0 +1,25 @@
+menu "HAL power"
+
+    config HAL_POWER_BATTERY_MONITOR
+        bool "Monitor the battery voltage"
+        default n
+        help
+            Enable only on a board that has the battery voltage divider wired
+            to the sense pin below. When enabled, the application starts the
+            monitor, shows the low battery pattern, and puts the device into
+            deep sleep at a critical level. Only a reset wakes it again.
+
+            Leave this off on a board without the divider. The sense pin then
+            floats, and a reading between the absent-battery and the critical
+            threshold would put the device to sleep after every boot.
+
+    config HAL_POWER_ADC_CHANNEL
+        int "Battery sense ADC1 channel"
+        range 0 9
+        default 0
+        help
+            ADC1 channel that reads the battery through a 1:2 voltage divider.
+            On the ESP32-S3, ADC1 channel N is GPIO N+1, so the default 0 is
+            GPIO1.
+
+endmenu
