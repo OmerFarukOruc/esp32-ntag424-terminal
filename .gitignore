@@ -1,0 +1,10 @@
+# ESP-IDF build output
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# Editor and clangd state
+.cache/
+.vscode/
+.idea/

@@ -1,0 +1,3 @@
+[submodule "libs/ESP32-PN532"]
+	path = libs/ESP32-PN532
+	url = https://codeberg.org/RevK/ESP32-PN532.git

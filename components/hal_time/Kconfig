@@ -1,0 +1,14 @@
+menu "HAL time"
+
+    config HAL_TIME_NTP_SERVER_PRIMARY
+        string "Primary NTP server"
+        default "pool.ntp.org"
+
+    config HAL_TIME_NTP_SERVER_SECONDARY
+        string "Secondary NTP server (empty for none)"
+        default "time.google.com"
+        help
+            The build needs CONFIG_LWIP_SNTP_MAX_SERVERS of at least 2, which
+            sdkconfig.defaults sets. The lwIP default is 1.
+
+endmenu

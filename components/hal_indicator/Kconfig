@@ -1,0 +1,43 @@
+menu "Indicator (hal_indicator)"
+
+    config HAL_INDICATOR_LED_GPIO
+        int "WS2812 status LED GPIO"
+        range 0 SOC_GPIO_OUT_RANGE_MAX
+        default 48
+        help
+            GPIO that drives the single WS2812 status LED. ESP32-S3-DevKitC-1
+            v1.0 uses GPIO48 and v1.1 uses GPIO38. On modules with 1.8 V
+            flash/PSRAM supply (ESP32-S3R8V), GPIO47 and GPIO48 run at 1.8 V.
+
+    config HAL_INDICATOR_BUZZER_GPIO
+        int "Buzzer GPIO"
+        range 0 SOC_GPIO_OUT_RANGE_MAX
+        default 10
+        help
+            GPIO that drives the buzzer through LEDC.
+
+    choice HAL_INDICATOR_BUZZER_TYPE
+        prompt "Buzzer type"
+        default HAL_INDICATOR_BUZZER_ACTIVE
+        help
+            An active buzzer has its own oscillator and sounds while the pin is
+            held at its on level; every sound has the same pitch. A passive
+            buzzer needs a tone, so the pin gets a 50% duty PWM at the pitch
+            of each beep.
+
+        config HAL_INDICATOR_BUZZER_ACTIVE
+            bool "Active buzzer (fixed pitch)"
+
+        config HAL_INDICATOR_BUZZER_PASSIVE
+            bool "Passive buzzer (PWM tone)"
+    endchoice
+
+    config HAL_INDICATOR_BUZZER_ACTIVE_LOW
+        bool "Active buzzer sounds when the pin is low"
+        depends on HAL_INDICATOR_BUZZER_ACTIVE
+        default y
+        help
+            Enable when the buzzer circuit sounds with the pin at 0 V and stays
+            silent with the pin at 3.3 V.
+
+endmenu
