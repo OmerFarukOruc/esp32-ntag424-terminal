@@ -341,12 +341,13 @@ pre-commit run --all-files
 
 Commit messages follow Conventional Commits, for example `fix(hal_ble): reject an empty ssid`. The subject needs at least 10 characters.
 
-CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and on tags that start with `v`. It has four jobs.
+CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and on tags that start with `v`. It has five jobs.
 
 - `pre-commit` runs the pre-commit stage hooks except `gitleaks`.
 - `gitleaks` scans the full git history.
 - `build` runs `idf.py build` in the `espressif/idf:v6.1` container, fails when the build changes `dependencies.lock`, and uploads the firmware files.
-- `publish` runs only for a `v*` tag, and only after the other three jobs pass.
+- `build-kconfig` builds once with each `sdkconfig.ci.*` file on top of `sdkconfig.defaults`. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build.
+- `publish` runs only for a `v*` tag, and only after the other four jobs pass.
 
 For a `v*` tag, `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
 

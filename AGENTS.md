@@ -13,6 +13,8 @@ pre-commit run --all-files
 
 `./scripts/build.sh` needs ESP-IDF v6.1 and activates it when `idf.py` is not on PATH. The hooks are listed in `.pre-commit-config.yaml`, and `pre-commit run --all-files` runs only the pre-commit stage. The commit-msg hook rejects a commit message that is not Conventional Commits, and the build runs again on push. CI fails when the build changes `dependencies.lock`, so commit the refreshed file with any manifest change. Commit messages carry no tool attribution lines.
 
+CI also builds each `sdkconfig.ci.*` file, which flips the options the default build leaves on one side of an `#if`. When you add an `#if CONFIG_...` branch, put the option that reaches it into one of those files, and build it locally with `idf.py -B build-<name> -D SDKCONFIG=build-<name>/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ci.<name>" build`. To find a build failure in a log, grep `': (error|warning):|^FAILED'`, because a bare `error` also matches object files such as `error.c.obj`.
+
 Hardware behaviour cannot be checked in CI. Mark a claim about the PN532, the tag, BLE pairing, or timing as unverified until [docs/hardware-test-runbook.md](docs/hardware-test-runbook.md) has run on a board.
 
 ## Layout

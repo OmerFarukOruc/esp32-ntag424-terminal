@@ -1,0 +1,3 @@
+# CI build: active-low button without the internal pull-up, active buzzer that sounds on a high pin
+CONFIG_HAL_BUTTON_INTERNAL_PULLUP=n
+CONFIG_HAL_INDICATOR_BUZZER_ACTIVE_LOW=n
