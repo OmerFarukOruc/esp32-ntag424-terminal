@@ -55,14 +55,15 @@ Install ESP-IDF v6.1 with EIM, Espressif's installer.
    source ~/.espressif/tools/activate_idf_v6.1.sh
    ```
 
-Clone with the submodule. The PN532 library lives in `libs/ESP32-PN532`.
+Clone the repository, then fetch the PN532 library into `libs/ESP32-PN532`.
 
 ```sh
-git clone --recurse-submodules https://github.com/OmerFarukOruc/esp32-ntag424-terminal.git
+git clone https://github.com/OmerFarukOruc/esp32-ntag424-terminal.git
 cd esp32-ntag424-terminal
+git submodule update --init
 ```
 
-If you cloned without `--recurse-submodules`, run `git submodule update --init`.
+Do not use `--recurse-submodules`. The PN532 library has a nested submodule for its PCB case whose pinned commit no longer exists upstream, so a recursive clone stops with an error. The firmware does not need it.
 
 ## Build, flash, monitor
 
