@@ -1,0 +1,4 @@
+# CI build: active-high button without the pull-up, passive buzzer, battery monitor on
+CONFIG_HAL_BUTTON_ACTIVE_LOW=n
+CONFIG_HAL_INDICATOR_BUZZER_PASSIVE=y
+CONFIG_HAL_POWER_BATTERY_MONITOR=y
