@@ -99,7 +99,7 @@ Run `idf.py menuconfig` and open **Component config**. `sdkconfig.defaults` hold
 
 Set these before you flash.
 
-- **`HAL_NFC_SDM_BASE_URL`** is the URL prefix written to the tag. Point it at the backend that serves the tap URL. Do not end it with a slash. It can be at most 139 characters, and the build fails when it is longer.
+- **`HAL_NFC_SDM_BASE_URL`** is the URL prefix written to the tag. Point it at the backend that serves the tap URL. It is `http://` or `https://`, a host name, an optional port and an optional path, with no query, fragment, space or trailing slash. It can be at most 139 characters. The build fails when the value breaks either rule.
 - **Pins.** Change the NFC, button, LED, and buzzer GPIOs when your wiring differs from the table above.
 - **Buzzer.** Pick `HAL_INDICATOR_BUZZER_ACTIVE` or `HAL_INDICATOR_BUZZER_PASSIVE` to match your part. `HAL_INDICATOR_BUZZER_ACTIVE_LOW` applies to active buzzers only. Turn it on when the buzzer sounds with the pin at 0 V.
 - **Button.** `HAL_BUTTON_INTERNAL_PULLUP` is offered only when `HAL_BUTTON_ACTIVE_LOW` is on, because the pull-up needs a button that reads low when pressed.
