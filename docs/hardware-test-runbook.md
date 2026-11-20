@@ -332,6 +332,11 @@ The `BLE advertising stopped` line comes from the BLE host task, so it can appea
 | Missing `ssid`, or a `password` that is not a string | ATT error `0x13`, log `WiFi config needs a string ssid and, when present, a string password` | [ ] |
 | 64-byte password that is not hex | A failure notification at once, log `A 64-byte password must be 64 hex digits`, and the current connection stays up | [ ] |
 | Short press while connecting | Returns to IDLE and the connection continues. The LED pulses blue until the press, then blinks brown until the link is up. | [ ] |
+| Short press, then new credentials | Press while connecting, hold 3 s, and send other credentials. Only the second attempt sends a notification, and it matches the second network. | [ ] |
+| Correct credentials, DHCP off | With DHCP disabled on the access point, the notification is `{"success":false,...}` at about 180 s after the write (up to 0.1 s of polling and the BLE send later), with `No IP address 30 s after joining, disconnecting` lines before it. Time it from the write to the notification. | [ ] |
+| Credentials replaced while an address event is queued | Join network A, then send credentials for network B (a second access point, or A with its radio switched off). B reports success only after the log shows `Got IP` while joined to B. Look for `Got IP event ignored` and no early success notification. | [ ] |
+| Scan during a connect | Write WIFI_SCAN right after WIFI_CONFIG. The scan answers with the empty terminator, and the connect finishes as usual. | [ ] |
+| WIFI_CONFIG during a scan | Write WIFI_CONFIG while the scan runs (long scan with a saved network out of range). The notification is a failure, and the old connection stays up until the scan ends. | [ ] |
 
 #### Wrong password
 
@@ -461,7 +466,8 @@ The monitor samples every 30 s. Raise or lower the supply to test the levels.
 | Critical (below 3100 mV) | Two readings in a row, 30 s apart, give `hal_power: Battery level changed: <old> -> 0`, `Critical battery, entering deep sleep`, and `hal_power: Entering deep sleep`. BLE, WiFi, and SNTP stop first. Only a reset or a power cycle wakes the device. | [ ] |
 | Critical during a tag write | `Deep sleep postponed: a tag write is running`. The device sleeps after the write result. | [ ] |
 | Critical during a WiFi scan | `Deep sleep postponed: a scan is running`. The device sleeps after the scan terminator. | [ ] |
-| Radio that does not stop | Not reproducible without a fault. The code logs `Deep sleep postponed: stopping the radios failed`, retries on the next two 5 s polls, then logs `The radios did not stop in 3 attempts, sleeping anyway` and sleeps. | [ ] |
+| Critical while WiFi work runs | During a connect call or a reconnect start, a failed stop logs `Deinit refused: WiFi work is running` and the device sleeps within the 3 passes. | [ ] |
+| Radio that does not stop | Not reproducible without a fault. The code logs `Deep sleep postponed: stopping the radios failed`, retries on the next two state task passes (5 s apart, or 100 ms apart while a WiFi request waits), then logs `The radios did not stop in 3 attempts, sleeping anyway` and sleeps. | [ ] |
 | New request while the sleep waits | During a postponed sleep, a WIFI_SCAN gets the empty terminator, a URL_SET gets code 1099 `low_battery`, and a WIFI_CONFIG gets the failure notification, each with the log `<event> rejected in state <state>: low_battery` | [ ] |
 
 The level numbers in the log are 0 critical, 1 low, 2 medium, and 3 normal.

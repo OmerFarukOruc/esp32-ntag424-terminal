@@ -16,6 +16,7 @@ typedef int esp_err_t;
 #define ESP_ERR_NOT_SUPPORTED 0x106
 #define ESP_ERR_TIMEOUT 0x107
 #define ESP_ERR_INVALID_RESPONSE 0x108
+#define ESP_ERR_NOT_FINISHED 0x10C
 #define ESP_ERR_WIFI_BASE 0x3000
 const char *esp_err_to_name(esp_err_t);
 #define ESP_ERROR_CHECK_WITHOUT_ABORT(x) (x)

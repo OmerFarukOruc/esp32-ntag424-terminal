@@ -230,6 +230,7 @@ esp_err_t hal_ble_send_wifi_config_result(hal_ble_session_t s, bool ok, const ch
 {
     trace.wifi_results++;
     trace.last_wifi_ok = ok;
+    trace.last_wifi_session = s;
     return ESP_OK;
 }
 
@@ -293,7 +294,7 @@ esp_err_t hal_network_deinit(void)
     return trace.net_deinit_err;
 }
 
-esp_err_t hal_wifi_connect(const hal_wifi_credentials_t *c)
+esp_err_t hal_wifi_connect(const hal_wifi_credentials_t *c, hal_wifi_attempt_id_t *attempt)
 {
     trace.connects++;
     memcpy(&trace.last_creds, c, sizeof * c);
@@ -302,7 +303,47 @@ esp_err_t hal_wifi_connect(const hal_wifi_credentials_t *c)
         trace.on_connect = NULL;
         f();
     }
-    return trace.connect_err;
+    *attempt = 0;
+    if (trace.connect_err != ESP_OK) {
+        return trace.connect_err;
+    }
+    *attempt = ++trace.attempt_last;
+    trace.attempt = *attempt;
+    trace.attempt_status = HAL_WIFI_ATTEMPT_PENDING;
+    return ESP_OK;
+}
+
+hal_wifi_attempt_status_t hal_wifi_attempt_take(hal_wifi_attempt_id_t id)
+{
+    if (id == 0 || id != trace.attempt) {
+        return HAL_WIFI_ATTEMPT_NONE;
+    }
+    hal_wifi_attempt_status_t status = trace.attempt_status;
+    if (status != HAL_WIFI_ATTEMPT_PENDING) {
+        trace.attempt = 0;
+        trace.attempt_status = HAL_WIFI_ATTEMPT_NONE;
+    }
+    return status;
+}
+
+void hal_wifi_attempt_cancel(hal_wifi_attempt_id_t id)
+{
+    trace.last_cancelled = id;
+    if (id != 0 && id == trace.attempt) {
+        trace.attempt = 0;
+        trace.attempt_status = HAL_WIFI_ATTEMPT_NONE;
+    }
+}
+
+void host_wifi_finish(bool success)
+{
+    if (trace.attempt != 0 && trace.attempt_status == HAL_WIFI_ATTEMPT_PENDING) {
+        trace.attempt_status = success ? HAL_WIFI_ATTEMPT_SUCCEEDED : HAL_WIFI_ATTEMPT_FAILED;
+    }
+    trace.wifi_state = success ? HAL_WIFI_STATE_CONNECTED : HAL_WIFI_STATE_DISCONNECTED;
+    if (trace.wifi_cb != NULL) {
+        trace.wifi_cb(trace.wifi_state);
+    }
 }
 
 hal_wifi_state_t hal_wifi_get_state(void)
@@ -312,6 +353,7 @@ hal_wifi_state_t hal_wifi_get_state(void)
 
 void hal_wifi_register_callback(hal_wifi_event_cb_t cb)
 {
+    trace.wifi_cb = cb;
 }
 
 esp_err_t hal_wifi_scan(hal_wifi_ap_t aps[HAL_WIFI_SCAN_MAX], uint16_t *count)

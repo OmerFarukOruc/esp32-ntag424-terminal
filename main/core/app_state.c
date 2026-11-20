@@ -34,6 +34,7 @@ static const char *TAG = "app_state";
 #define STATE_TASK_STACK            8192
 #define STATE_TASK_PRIORITY         5
 #define STATE_TASK_POLL_MS          5000
+#define WIFI_ATTEMPT_POLL_MS        100
 #define FACTORY_RESET_FEEDBACK_MS   1500
 #define QUEUE_OVERFLOW_THRESHOLD    3
 /* Chosen, not from a source: deep sleep powers the radios down even when they did not stop (ESP-IDF v6.1 sleep
@@ -96,6 +97,7 @@ static bool s_critical_battery_pending;  /* A tag write or a scan postponed the 
 static int s_radio_stop_failures;
 static bool s_low_battery_pending;       /* The warning came outside IDLE */
 static hal_ble_session_t s_wifi_session = HAL_BLE_SESSION_NONE;  /* The client waiting for the WiFi result */
+static hal_wifi_attempt_id_t s_wifi_attempt;
 
 static QueueHandle_t s_event_queue;
 static bool s_boot_fault;  /* Written before INIT_COMPLETE is queued, read by the state task after */
@@ -331,6 +333,22 @@ static bool in_onboarding(app_state_t state)
     return state == APP_STATE_ONBOARDING_BLE || state == APP_STATE_WRITING_TAG;
 }
 
+static void send_wifi_result(hal_ble_session_t session, bool success);
+
+static void answer_wifi_attempt_before_error(void)
+{
+    if (s_wifi_attempt != 0) {
+        send_wifi_result(s_wifi_session, hal_wifi_attempt_take(s_wifi_attempt) == HAL_WIFI_ATTEMPT_SUCCEEDED);
+    }
+}
+
+static void detach_wifi_attempt(void)
+{
+    hal_wifi_attempt_cancel(s_wifi_attempt);
+    s_wifi_attempt = 0;
+    s_wifi_session = HAL_BLE_SESSION_NONE;
+}
+
 /* The cause is the event that made the transition. APP_EVENT_COUNT marks a cause that is no event. */
 static void transition_to(app_state_t new_state, app_event_t cause)
 {
@@ -339,6 +357,12 @@ static void transition_to(app_state_t new_state, app_event_t cause)
     }
 
     app_state_t old_state = s_state;
+    if (old_state == APP_STATE_CONNECTING_WIFI) {
+        if (new_state == APP_STATE_ERROR) {
+            answer_wifi_attempt_before_error();
+        }
+        detach_wifi_attempt();
+    }
     if (in_onboarding(old_state) && !in_onboarding(new_state)) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(hal_ble_stop_advertising());
         /* The client of a WiFi connect attempt stays connected so that it gets the result. */
@@ -430,14 +454,30 @@ static void send_wifi_result(hal_ble_session_t session, bool success)
 
 static void handle_wifi_config(hal_ble_session_t session, const hal_wifi_credentials_t *creds)
 {
-    esp_err_t err = hal_wifi_connect(creds);
+    hal_wifi_attempt_id_t attempt;
+    esp_err_t err = hal_wifi_connect(creds, &attempt);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed to start: %s", esp_err_to_name(err));
         send_wifi_result(session, false);
         return;
     }
     s_wifi_session = session;
+    s_wifi_attempt = attempt;
     transition_to(APP_STATE_CONNECTING_WIFI, APP_EVENT_WIFI_CONFIG_RECEIVED);
+}
+
+static void finish_wifi_attempt(void)
+{
+    if (s_wifi_attempt == 0) {
+        return;
+    }
+    hal_wifi_attempt_status_t status = hal_wifi_attempt_take(s_wifi_attempt);
+    if (status == HAL_WIFI_ATTEMPT_PENDING) {
+        return;
+    }
+    bool success = status == HAL_WIFI_ATTEMPT_SUCCEEDED;
+    send_wifi_result(s_wifi_session, success);
+    transition_to(APP_STATE_IDLE, success ? APP_EVENT_WIFI_CONNECTED : APP_EVENT_WIFI_DISCONNECTED);
 }
 
 static void finish_tag_write(const void *data)
@@ -513,17 +553,7 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
         break;
 
     case APP_STATE_CONNECTING_WIFI:
-        if (event == APP_EVENT_WIFI_CONNECTED && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED) {
-            send_wifi_result(s_wifi_session, true);
-            transition_to(APP_STATE_IDLE, event);
-        } else if (event == APP_EVENT_WIFI_DISCONNECTED) {
-            /* An event queued before this connect attempt must not end it. */
-            hal_wifi_state_t wifi_state = hal_wifi_get_state();
-            if (wifi_state != HAL_WIFI_STATE_CONNECTING && wifi_state != HAL_WIFI_STATE_CONNECTED) {
-                send_wifi_result(s_wifi_session, false);
-                transition_to(APP_STATE_IDLE, event);
-            }
-        } else if (event == APP_EVENT_BUTTON_SHORT) {
+        if (event == APP_EVENT_BUTTON_SHORT) {
             transition_to(APP_STATE_IDLE, event);
         }
         break;
@@ -540,7 +570,7 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
     }
 }
 
-static const char *request_refusal(void)
+static const char *request_refusal(app_event_t event)
 {
     if (s_critical_battery_pending) {
         return "low_battery";
@@ -548,6 +578,9 @@ static const char *request_refusal(void)
     /* A client can stay connected after onboarding ends, so answer instead of dropping. */
     if (s_state != APP_STATE_ONBOARDING_BLE && s_state != APP_STATE_WRITING_TAG) {
         return "not_onboarding";
+    }
+    if (event == APP_EVENT_WIFI_CONFIG_RECEIVED && app_wifi_scan_running()) {
+        return "scan_running";
     }
     return NULL;
 }
@@ -591,7 +624,7 @@ static void dispatch_event(const event_msg_t *msg, const void *data, size_t data
             ESP_LOGW(TAG, "%s dropped: the client that sent it is gone", s_event_names[msg->event]);
             return;
         }
-        const char *refusal = request_refusal();
+        const char *refusal = request_refusal(msg->event);
         if (refusal != NULL) {
             ESP_LOGW(TAG, "%s rejected in state %s: %s", s_event_names[msg->event], s_state_names[s_state], refusal);
             if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
@@ -631,7 +664,8 @@ static void handle_event(const event_msg_t *msg)
 static void state_task_poll(void)
 {
     event_msg_t msg;
-    if (xQueueReceive(s_event_queue, &msg, pdMS_TO_TICKS(STATE_TASK_POLL_MS)) == pdTRUE) {
+    TickType_t wait = pdMS_TO_TICKS(s_wifi_attempt != 0 ? WIFI_ATTEMPT_POLL_MS : STATE_TASK_POLL_MS);
+    if (xQueueReceive(s_event_queue, &msg, wait) == pdTRUE) {
         handle_event(&msg);
 
         /* A tag write must end through URL_SET_DONE, so the alarm waits for it. */
@@ -643,6 +677,7 @@ static void state_task_poll(void)
     } else if (s_critical_battery_pending) {
         power_down_when_idle();
     }
+    finish_wifi_attempt();
     esp_task_wdt_reset();
 }
 

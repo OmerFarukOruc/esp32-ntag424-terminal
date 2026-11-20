@@ -24,6 +24,8 @@ static void drain(void)
     }
 }
 
+static void write_wifi_config(hal_ble_session_t session, const char *ssid, const char *password, esp_err_t *ack);
+
 static void reset(app_state_t state)
 {
     memset(&trace, 0, sizeof trace);
@@ -33,10 +35,29 @@ static void reset(app_state_t state)
     s_state = state;
     s_critical_battery_pending = false;
     s_radio_stop_failures = 0;
+    s_wifi_attempt = 0;
+    s_wifi_session = HAL_BLE_SESSION_NONE;
     host_run_tasks();
     drain();
     memset(&trace, 0, sizeof trace);
     trace.ble_current = SESSION_A;
+    trace.wifi_cb = wifi_event_callback;
+}
+
+static void start_wifi_attempt(void)
+{
+    esp_err_t ack;
+    write_wifi_config(SESSION_A, "HomeNet", "SECRETPASSWORD1", &ack);
+    drain();
+}
+
+static int fill_queue(void)
+{
+    int posted = 0;
+    while (app_post_event(APP_EVENT_WIFI_CONNECTING, NULL, 0) == ESP_OK) {
+        posted++;
+    }
+    return posted;
 }
 
 static void poll_state_task(void)
@@ -223,21 +244,96 @@ int main(void)
           ack == ESP_OK && second_ack == ESP_OK && trace.connects == 2 && strcmp(trace.last_creds.ssid, "SecondNet") == 0 &&
           trace.wifi_results == 2, d);
 
-    reset(APP_STATE_CONNECTING_WIFI);
-    trace.wifi_state = HAL_WIFI_STATE_CONNECTING;
+    reset(APP_STATE_ONBOARDING_BLE);
+    start_wifi_attempt();
     app_post_event(APP_EVENT_WIFI_CONNECTED, NULL, 0);
-    drain();
+    poll_state_task();
     snprintf(d, sizeof d, "replies=%d, state=%s", trace.wifi_results, s_state_names[s_state]);
-    check("a WIFI_CONNECTED event while the driver still connects does not end the attempt",
+    check("positive control: a WIFI_CONNECTED event while the attempt is pending does not end it",
           trace.wifi_results == 0 && s_state == APP_STATE_CONNECTING_WIFI, d);
 
-    reset(APP_STATE_CONNECTING_WIFI);
-    trace.wifi_state = HAL_WIFI_STATE_CONNECTED;
-    app_post_event(APP_EVENT_WIFI_CONNECTED, NULL, 0);
+    static const struct {
+        bool ok;
+        const char *name;
+    } results[] = {
+        {true, "positive control: a successful attempt is answered once, to its own client, and the device returns to idle"},
+        {false, "positive control: a failed attempt is answered once, to its own client, and the device returns to idle"},
+    };
+    for (size_t i = 0; i < sizeof results / sizeof results[0]; i++) {
+        reset(APP_STATE_ONBOARDING_BLE);
+        start_wifi_attempt();
+        host_wifi_finish(results[i].ok);
+        poll_state_task();
+        poll_state_task();
+        snprintf(d, sizeof d, "replies=%d ok=%d session=%#x, state=%s", trace.wifi_results, trace.last_wifi_ok,
+                 (unsigned)trace.last_wifi_session, s_state_names[s_state]);
+        check(results[i].name, trace.wifi_results == 1 && trace.last_wifi_ok == results[i].ok &&
+              trace.last_wifi_session == SESSION_A && s_state == APP_STATE_IDLE, d);
+    }
+
+    for (size_t i = 0; i < sizeof results / sizeof results[0]; i++) {
+        reset(APP_STATE_ONBOARDING_BLE);
+        start_wifi_attempt();
+        int filled = fill_queue();
+        host_wifi_finish(results[i].ok);
+        drain();
+        int replies_before_poll = trace.wifi_results;
+        poll_state_task();
+        poll_state_task();
+        snprintf(d, sizeof d, "queue filled with %d events, replies before the poll=%d, after=%d ok=%d, state=%s", filled,
+                 replies_before_poll, trace.wifi_results, trace.last_wifi_ok, s_state_names[s_state]);
+        check(results[i].ok ? "a successful outcome whose wake-up the full queue dropped is answered once by polling"
+              : "a failed outcome whose wake-up the full queue dropped is answered once by polling",
+              filled == EVENT_QUEUE_SIZE && trace.wifi_results == 1 && trace.last_wifi_ok == results[i].ok &&
+              s_state == APP_STATE_IDLE, d);
+    }
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    start_wifi_attempt();
+    poll_state_task();
+    TickType_t waiting = host_queue_last_wait;
+    host_wifi_finish(true);
+    poll_state_task();
+    poll_state_task();
+    TickType_t idle = host_queue_last_wait;
+    snprintf(d, sizeof d, "wait while the request is pending=%u ms, after its reply=%u ms", (unsigned)waiting,
+             (unsigned)idle);
+    check("the state task waits 100 ms for events while a WiFi request is pending, and 5000 ms otherwise",
+          waiting == pdMS_TO_TICKS(100) && idle == pdMS_TO_TICKS(5000), d);
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    start_wifi_attempt();
+    hal_wifi_attempt_id_t cancelled = trace.attempt;
+    app_post_event(APP_EVENT_BUTTON_SHORT, NULL, 0);
     drain();
-    snprintf(d, sizeof d, "replies=%d ok=%d, state=%s", trace.wifi_results, trace.last_wifi_ok, s_state_names[s_state]);
-    check("a WIFI_CONNECTED event while the driver is connected reports success",
-          trace.wifi_results == 1 && trace.last_wifi_ok && s_state == APP_STATE_IDLE, d);
+    hal_wifi_attempt_id_t told_to_cancel = trace.last_cancelled;
+    host_wifi_finish(true);
+    poll_state_task();
+    int replies_after_cancel = trace.wifi_results;
+    app_post_event(APP_EVENT_BUTTON_HOLD_3S, NULL, 0);
+    drain();
+    start_wifi_attempt();
+    hal_wifi_attempt_id_t fresh = trace.attempt;
+    host_wifi_finish(false);
+    poll_state_task();
+    snprintf(d, sizeof d, "cancelled attempt %u, replies after the cancel=%d, new attempt %u, replies=%d ok=%d",
+             (unsigned)cancelled, replies_after_cancel, (unsigned)fresh,
+             trace.wifi_results, trace.last_wifi_ok);
+    check("positive control: after a short press, a new request gets its own attempt and its own reply, and the old one none",
+          cancelled != 0 && replies_after_cancel == 0 && fresh != cancelled && trace.wifi_results == 1 &&
+          !trace.last_wifi_ok && s_state == APP_STATE_IDLE, d);
+    snprintf(d, sizeof d, "HAL told to cancel %u, cancelled %u", (unsigned)told_to_cancel, (unsigned)cancelled);
+    check("the HAL is told which attempt the short press detached", told_to_cancel == cancelled, d);
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    trace.connect_err = ESP_FAIL;
+    start_wifi_attempt();
+    poll_state_task();
+    snprintf(d, sizeof d, "replies=%d ok=%d, state=%s, wait=%u ms", trace.wifi_results, trace.last_wifi_ok,
+             s_state_names[s_state], (unsigned)host_queue_last_wait);
+    check("positive control: a connect that fails at once gets one failure reply and no pending attempt",
+          trace.wifi_results == 1 && !trace.last_wifi_ok && s_state == APP_STATE_ONBOARDING_BLE &&
+          host_queue_last_wait == pdMS_TO_TICKS(5000), d);
 
     reset(APP_STATE_ONBOARDING_BLE);
     post_event(APP_EVENT_WIFI_SCAN_REQUESTED, SESSION_A, NULL, 0, 0);
@@ -371,6 +467,49 @@ int main(void)
         check(name, refused == QUEUE_OVERFLOW_THRESHOLD + 2 && !alarm && streak == 1 &&
               trace.diag_queue_overflows == 0 && accepted == ESP_OK && queued.event == refused_cases[i].posted, d);
     }
+    static const struct {
+        bool finished_ok;
+        bool finish_first;
+        const char *name;
+    } alarm_cases[] = {
+        {false, false, "an overflow alarm that ends a pending WiFi request answers it once with a failure"},
+        {true, true, "an overflow alarm that finds the WiFi request already succeeded answers it once with success"},
+    };
+    for (size_t i = 0; i < sizeof alarm_cases / sizeof alarm_cases[0]; i++) {
+        reset(APP_STATE_ONBOARDING_BLE);
+        start_wifi_attempt();
+        if (alarm_cases[i].finish_first) {
+            host_wifi_finish(true);
+        }
+        app_post_event(APP_EVENT_WIFI_CONNECTING, NULL, 0);
+        atomic_store(&s_overflow_alarm, true);
+        poll_state_task();
+        poll_state_task();
+        snprintf(d, sizeof d, "replies=%d ok=%d session=%#x, state=%s, HAL told to cancel %u", trace.wifi_results,
+                 trace.last_wifi_ok, (unsigned)trace.last_wifi_session, s_state_names[s_state],
+                 (unsigned)trace.last_cancelled);
+        check(alarm_cases[i].name, trace.wifi_results == 1 && trace.last_wifi_ok == alarm_cases[i].finished_ok &&
+              trace.last_wifi_session == SESSION_A && s_state == APP_STATE_ERROR &&
+              trace.last_cancelled != 0, d);
+        atomic_store(&s_overflow_alarm, false);
+    }
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    post_event(APP_EVENT_WIFI_SCAN_REQUESTED, SESSION_A, NULL, 0, 0);
+    drain();
+    start_wifi_attempt();
+    int replies_during_scan = trace.wifi_results;
+    bool refused = !trace.last_wifi_ok && trace.last_wifi_session == SESSION_A;
+    int connects_during_scan = trace.connects;
+    app_state_t state_during_scan = s_state;
+    host_run_tasks();
+    drain();
+    snprintf(d, sizeof d, "replies=%d refused=%d connects=%d, state during the scan=%s, scan replies=%d",
+             replies_during_scan, refused, connects_during_scan, s_state_names[state_during_scan], trace.scan_sends);
+    check("a WiFi request that arrives while a scan runs is refused with a failure reply and starts no connect",
+          replies_during_scan == 1 && refused && connects_during_scan == 0 &&
+          state_during_scan == APP_STATE_ONBOARDING_BLE && trace.scan_sends >= 1, d);
+
     vQueueDelete(s_event_queue);
     return check_summary();
 }
