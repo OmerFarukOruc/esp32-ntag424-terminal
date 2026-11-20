@@ -54,8 +54,9 @@ int64_t nfc_deadline_left_ms(void);
 /** vTaskDelay() that ends at the deadline */
 void nfc_delay_ms(uint32_t ms);
 
-/** Let PN532 reads run a short time past the deadline, to release the tag */
-void nfc_deadline_allow_cleanup(void);
+/** Release the activated tag within 200 ms of now and of the deadline, also past the deadline, then bound PN532 I/O
+ *  by the deadline again */
+void nfc_release_tag_in_cleanup_time(void);
 
 /* nfc_reader.c: PN532 link recovery and tag detection. Callers hold g_nfc.mutex. */
 

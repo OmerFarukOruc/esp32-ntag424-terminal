@@ -330,8 +330,7 @@ release:
     if (err == HAL_NFC_ERR_SDM_TIMEOUT && t_write != 0) {
         ESP_LOGW(TAG, "SDM config: timeout after WriteData, the NDEF URL is written and the SDM state is not confirmed");
     }
-    nfc_deadline_allow_cleanup();
-    nfc_reader_release_tag();
+    nfc_release_tag_in_cleanup_time();
     return err;
 }
 

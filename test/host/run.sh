@@ -53,7 +53,7 @@ build() {
         gcc "${cflags[@]}" -Wno-format "${nfc_inc[@]}" -DPN532_SRC="\"$repo/libs/ESP32-PN532/pn532.c\"" "$host/test_pn532_io.c" \
             "$host/support/uart.c" "$host/support/gpio.c" "$nfc/hal_nfc.c" "$nfc/nfc_reader.c" "$nfc/desfire_ev2.c" "$nfc/ntag424_sdm.c" \
             "$repo/components/pn532_driver/pn532_io_deadline.c" "$host/support/crypto_openssl.c" \
-            "$host/support/platform.c" -Wl,--wrap=uart_read_bytes "${crypto[@]}" "$@"
+            "$host/support/platform.c" -Wl,--wrap=uart_read_bytes,--wrap=uart_write_bytes "${crypto[@]}" "$@"
         ;;
     power)
         gcc "${cflags[@]}" -I "$repo/components/hal_power/include" \

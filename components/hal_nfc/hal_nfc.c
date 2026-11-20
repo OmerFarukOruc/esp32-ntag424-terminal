@@ -67,10 +67,13 @@ void nfc_delay_ms(uint32_t ms)
     }
 }
 
-void nfc_deadline_allow_cleanup(void)
+void nfc_release_tag_in_cleanup_time(void)
 {
     int64_t cleanup_us = deadline_after_ms(CLEANUP_IO_MS);
-    pn532_io_deadline_set(NFC_UART_NUM, cleanup_us > g_nfc.deadline_us ? cleanup_us : g_nfc.deadline_us);
+    int64_t latest_us = g_nfc.deadline_us + CLEANUP_IO_MS * 1000LL;
+    pn532_io_deadline_set(NFC_UART_NUM, cleanup_us < latest_us ? cleanup_us : latest_us);
+    nfc_reader_release_tag();
+    pn532_io_deadline_set(NFC_UART_NUM, g_nfc.deadline_us);
 }
 
 esp_err_t hal_nfc_init(void)

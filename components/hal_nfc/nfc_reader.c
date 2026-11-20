@@ -117,12 +117,7 @@ static bool ping(void)
     }
 
     uint8_t fw_buf[8] = {0};
-    int tx = pn532_tx(g_nfc.pn532, 0x02, 0, NULL, 0, NULL);
-    if (tx < 0 && pn532_lasterr(g_nfc.pn532) == PN532_ERR_CMDPENDING) {
-        drain_pending();
-        tx = pn532_tx(g_nfc.pn532, 0x02, 0, NULL, 0, NULL);
-    }
-    if (tx < 0) {
+    if (pn532_tx(g_nfc.pn532, 0x02, 0, NULL, 0, NULL) < 0) {
         log_stage("ping_tx_failed");
         return false;
     }
@@ -183,6 +178,10 @@ static bool reinit(void)
             }
         }
         nfc_delay_ms(pass == 0 ? 200 : 250);
+        if (nfc_deadline_passed()) {
+            log_stage("reinit_stopped_at_deadline");
+            return false;
+        }
         g_nfc.pn532 = nfc_reader_open();
     }
     if (g_nfc.pn532 == NULL) {
@@ -208,6 +207,10 @@ bool nfc_reader_recover(bool *reinitialised)
     }
     if (soft_resync()) {
         return true;
+    }
+    if (nfc_deadline_passed()) {
+        log_stage("reinit_skipped_after_deadline");
+        return false;
     }
     ESP_LOGW(TAG, "Soft resync failed, hard re-initializing");
     if (reinitialised != NULL) {

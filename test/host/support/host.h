@@ -79,5 +79,11 @@ extern int64_t host_hang_limit_us;
 extern int64_t host_byte_gap_us;
 extern long host_bytes_read;
 
+#define HOST_TX_LOG_MAX 512
+extern bool host_uart_installed;
+extern int host_uart_installs;
+extern uint8_t host_tx_log[HOST_TX_LOG_MAX];
+extern size_t host_bytes_written;
+
 extern int host_gpio_level;
 extern gpio_isr_t host_gpio_isr;

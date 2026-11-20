@@ -60,6 +60,13 @@ static int settings_fails_left;
 static const uint8_t *production_uid;
 static int no_ndef_tag;
 static uint32_t run_timeout_ms;
+static int64_t io_deadline_us;
+static int64_t detect_io_deadline_us;
+static bool release_reads_noise;
+static int64_t release_us;
+static int64_t release_start_us;
+static int64_t release_deadline_us;
+static int releases;
 
 static void tags(int count, const uint8_t (*uids)[8])
 {
@@ -97,6 +104,7 @@ bool nfc_reader_recover(bool *re)
 
 hal_nfc_err_t nfc_reader_detect_tag(uint32_t ms)
 {
+    detect_io_deadline_us = io_deadline_us;
     if (++detect_calls < success_detect_call) {
         host_now_us += (int64_t)ms * 1000;
         return HAL_NFC_ERR_NO_TAG;
@@ -118,9 +126,20 @@ uint8_t *pn532_ats(pn532_t *r)
     return ats;
 }
 
-void nfc_reader_release_tag(void) {}
+void nfc_reader_release_tag(void)
+{
+    releases++;
+    release_start_us = host_now_us;
+    release_deadline_us = io_deadline_us;
+    if (release_reads_noise && io_deadline_us > host_now_us) {
+        host_now_us = io_deadline_us;
+    }
+    release_us = host_now_us - release_start_us;
+}
+
 void pn532_io_deadline_set(uart_port_t p, int64_t d)
 {
+    io_deadline_us = d;
 }
 
 void pn532_io_deadline_clear(void) {}
@@ -260,6 +279,8 @@ static hal_nfc_err_t run(int succeed_on, uint32_t recover_ms, int reinits, int s
 {
     host_now_us += 1000000;
     detect_calls = 0;
+    releases = 0;
+    release_us = 0;
     late_commands = 0;
     commands = 0;
     writes = 0;
@@ -295,6 +316,7 @@ static void defaults(void)
     production_uid = NULL;
     no_ndef_tag = -1;
     run_timeout_ms = 30000;
+    release_reads_noise = false;
     const size_t lens[3] = { 7, 7, 14 };
     const uint8_t sw2[3] = { 0xAF, 0xAF, 0x00 };
     memcpy(version_len, lens, sizeof lens);
@@ -350,6 +372,26 @@ int main(void)
     snprintf(d, sizeof d, "result=%d detects=%d selects=%d on a fresh PN532=%d writes=%d", r, detect_calls, selects,
              selects_on_inactive, writes);
     check("a SELECT retry after a PN532 re-init detects the tag again first", selects_on_inactive == 0 && r == HAL_NFC_OK, d);
+
+    release_reads_noise = true;
+    r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+    snprintf(d, sizeof d, "result=%d, %d releases, the last read for %.1f ms of a 30 s request", r, releases,
+             release_us / 1e3);
+    check("an early success releases the tag once, within 200 ms, while the line keeps sending",
+          r == HAL_NFC_OK && releases == 1 && release_us <= 200000, d);
+
+    r = run(1, 1000, 1, 2, ACCESS_CHANGE_KEY_0);
+    snprintf(d, sizeof d, "result=%d, last release started %+lld ms and may read until %+lld ms from the request deadline",
+             r, (long long)(release_start_us - deadline_us) / 1000, (long long)(release_deadline_us - deadline_us) / 1000);
+    check("a release that starts after the request deadline still ends by 200 ms past it",
+          release_start_us > deadline_us && release_deadline_us <= deadline_us + 200000, d);
+
+    r = run(1, 0, 1, 1, ACCESS_CHANGE_KEY_0);
+    snprintf(d, sizeof d, "result=%d, second detect read limit %+lld ms from the request deadline", r,
+             (long long)(detect_io_deadline_us - deadline_us) / 1000);
+    check("the attempt after a release reads by the request deadline again",
+          r == HAL_NFC_OK && detect_calls == 2 && detect_io_deadline_us == deadline_us, d);
+    release_reads_noise = false;
 
     r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_F);
     snprintf(d, sizeof d, "result=%d writes=%d settings=%d", r, writes, settings);
