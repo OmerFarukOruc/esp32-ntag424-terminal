@@ -208,8 +208,14 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
         if (err != HAL_NFC_OK) {
             break;
         }
-        if (r > 0 && !nfc_reader_recover(NULL)) {
+        bool reinitialised = false;
+        if (r > 0 && !nfc_reader_recover(&reinitialised)) {
             err = HAL_NFC_ERR_PN532_UNRESPONSIVE;
+            break;
+        }
+        if (reinitialised) {
+            ESP_LOGW(TAG, "SDM config: PN532 re-initialized, the tag must be detected again");
+            err = HAL_NFC_ERR_COMM;
             break;
         }
         err = nfc_select_ndef_app();
