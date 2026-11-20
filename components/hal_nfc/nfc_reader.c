@@ -20,7 +20,6 @@
 
 static const char *TAG = "hal_nfc";
 
-#define NFC_UART_NUM    ((uart_port_t)CONFIG_HAL_NFC_UART_NUM)
 /** PN532 library baud code for 115200 bps */
 #define PN532_BAUD_CODE 4
 /** PN532 port 3 output bits in use */

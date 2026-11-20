@@ -10,12 +10,16 @@
  */
 
 #include <string.h>
+#include "esp_timer.h"
 #include "hal_nfc_priv.h"
+#include "pn532_io_deadline.h"
 
 static const char *TAG = "hal_nfc";
 
 /** How long an entry point waits for a running conversation to finish */
 #define MUTEX_TIMEOUT_MS 1000
+/* Chosen, not from a source: pn532_init() needs a few hundred milliseconds when the reader answers. */
+#define INIT_IO_LIMIT_MS 5000
 
 nfc_ctx_t g_nfc;
 
@@ -29,7 +33,9 @@ esp_err_t hal_nfc_init(void)
     g_nfc.mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(g_nfc.mutex != NULL, ESP_ERR_NO_MEM, TAG, "Failed to create mutex");
 
+    pn532_io_deadline_set(NFC_UART_NUM, esp_timer_get_time() + (int64_t)INIT_IO_LIMIT_MS * 1000);
     g_nfc.pn532 = nfc_reader_open();
+    pn532_io_deadline_clear();
     if (g_nfc.pn532 == NULL) {
         ESP_LOGE(TAG, "Failed to initialize PN532");
         vSemaphoreDelete(g_nfc.mutex);
@@ -67,11 +73,16 @@ hal_nfc_err_t hal_nfc_ntag424_configure_sdm(const char *device_id, uint32_t time
             !hal_nfc_device_id_valid(device_id, strnlen(device_id, HAL_NFC_DEVICE_ID_MAX_LEN + 1))) {
         return HAL_NFC_ERR_INVALID_PARAM;
     }
+    const int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
     if (xSemaphoreTake(g_nfc.mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
         return HAL_NFC_ERR_TIMEOUT;
     }
 
+    if (timeout_ms > 0) {
+        pn532_io_deadline_set(NFC_UART_NUM, deadline_us);
+    }
     hal_nfc_err_t err = nfc_sdm_configure_locked(device_id, timeout_ms);
+    pn532_io_deadline_clear();
 
     xSemaphoreGive(g_nfc.mutex);
     return err;

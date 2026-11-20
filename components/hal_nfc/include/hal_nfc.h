@@ -57,7 +57,8 @@ typedef enum {
 /**
  * @brief Initialize the PN532 reader
  *
- * Uses the UART port and pins from menuconfig.
+ * Uses the UART port and pins from menuconfig. Gives up after 5 seconds of
+ * PN532 traffic that does not complete the setup.
  *
  * @return ESP_OK on success, ESP_ERR_NO_MEM or ESP_FAIL otherwise
  */

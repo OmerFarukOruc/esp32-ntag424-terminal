@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -23,6 +24,8 @@
 #include "hal_nfc.h"
 #include "pn532.h"
 #include "sdkconfig.h"
+
+#define NFC_UART_NUM                ((uart_port_t)CONFIG_HAL_NFC_UART_NUM)
 
 /** Largest ISO 7816 APDU the HAL builds or receives, including SW1 SW2 */
 #define NFC_APDU_BUF_SIZE           256

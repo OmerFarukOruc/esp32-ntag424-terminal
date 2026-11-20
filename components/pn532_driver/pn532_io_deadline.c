@@ -1,0 +1,46 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Omer Faruk Oruc
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <stdatomic.h>
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "pn532_io_deadline.h"
+
+#define NO_PORT (-1)
+
+static _Atomic int s_port = NO_PORT;
+static _Atomic int64_t s_deadline_us;
+
+void pn532_io_deadline_set(uart_port_t port, int64_t deadline_us)
+{
+    atomic_store(&s_deadline_us, deadline_us);
+    atomic_store(&s_port, (int)port);
+}
+
+void pn532_io_deadline_clear(void)
+{
+    atomic_store(&s_port, NO_PORT);
+}
+
+int __real_uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length, TickType_t ticks_to_wait);
+
+int __wrap_uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length, TickType_t ticks_to_wait)
+{
+    if ((int)uart_num == atomic_load(&s_port)) {
+        int64_t left_us = atomic_load(&s_deadline_us) - esp_timer_get_time();
+        if (left_us <= 0) {
+            return 0;
+        }
+        TickType_t left_ticks = pdMS_TO_TICKS((left_us + 999) / 1000);
+        if (left_ticks == 0) {
+            left_ticks = 1;
+        }
+        if (ticks_to_wait > left_ticks) {
+            ticks_to_wait = left_ticks;
+        }
+    }
+    return __real_uart_read_bytes(uart_num, buf, length, ticks_to_wait);
+}

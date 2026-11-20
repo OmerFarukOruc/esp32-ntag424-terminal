@@ -21,7 +21,7 @@ Hardware behaviour cannot be checked in CI. Mark a claim about the PN532, the ta
 
 - `main/core/` holds the state machine. `app_state_priv.h` is the interface between its files.
 - `components/hal_*/` are the hardware layers. The header in `include/` owns the contract of each one, and `hal_ble.h` owns the BLE wire format. Change the header and the doc in the same commit.
-- `components/pn532_driver/` builds `libs/ESP32-PN532` as a component. The library is a GPL-3.0 submodule. Leave it unmodified.
+- `components/pn532_driver/` builds `libs/ESP32-PN532` as a component. The library is a GPL-3.0 submodule. Leave it unmodified. The component links the library's `uart_read_bytes()` calls through `pn532_io_deadline.c`, which ends every PN532 read at the deadline the HAL sets, because the library restarts its timeout on each byte it reads.
 - Each component declares its options in its own `Kconfig`, shown in menuconfig under **Component config**. Project defaults live in `sdkconfig.defaults`, and the flash layout in `partitions.csv`.
 - Keep every source file under 1000 lines so a reviewer can read it whole. Split by responsibility, as `hal_nfc` is split into reader, AES, DESFire, and SDM files.
 
