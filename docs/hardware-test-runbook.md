@@ -195,7 +195,8 @@ Expect `hal_ble: BLE connected, conn_handle=<n>`, `MTU update: conn_handle=<n>, 
 | Bytes after the JSON | `{"deviceId":"SHOP"} x` to URL_SET fails with ATT error `0x13` and the same log line | [ ] |
 | NUL character | `{"deviceId":"SHOP\u0000X"}` to URL_SET fails with ATT error `0x13`, log `Write holds a NUL character` | [ ] |
 | Missing field | `{"x":1}` to URL_SET fails with ATT error `0x13` and `URL_SET needs a string deviceId` | [ ] |
-| No notifications | With notifications off on a characteristic, the write is accepted, no reply arrives, and the log shows `Client has not enabled notifications on this characteristic` | [ ] |
+| No notifications | With notifications off on a characteristic, the write fails with ATT error `0xFD`, and the log shows `Write refused: notifications are off on this characteristic` | [ ] |
+| Small MTU | With the default 23-byte MTU, a write fails with ATT error `0xFC`, and the log shows `Write refused: ATT MTU 23 is below 100` | [ ] |
 | Pairing failure | `Encryption failed, terminating connection` and a disconnect | [ ] |
 | Repeat pairing | Delete the bond on the phone only, reconnect, pair again. The device accepts it. | [ ] |
 
@@ -218,7 +219,7 @@ hal_ble: Sent WiFi scan results: <N> networks, 0 skipped
 | Security text | Only `OPEN`, `WPA2`, and `WPA3` appear. A mixed WPA/WPA2 network shows `WPA2`, and a mixed WPA2/WPA3 network shows `WPA3`. | [ ] |
 | Unjoinable networks | A WEP or WPA-only access point does not appear in the scan | [ ] |
 | Repeated request | A second write while a scan runs logs `Scan request ignored: a scan is already running` | [ ] |
-| Small MTU | Without an MTU request (23 bytes, so 20 per notification) every entry is skipped, and the terminator does not fit either. The log shows `Notification exceeds ATT MTU - 3 (20 bytes)`. With an MTU of 100 or more, every entry arrives. | [ ] |
+| Small MTU | Without an MTU request (23 bytes) the scan write fails with ATT error `0xFC` and no scan runs. With an MTU of 100 or more, every entry arrives. | [ ] |
 | Connected | A scan while the device is connected keeps the link up, and no `Attempting WiFi reconnect...` line follows the scan | [ ] |
 | Saved network out of range | A scan with a saved network that is out of range can log `Scan blocked by a connect attempt, retry <n> of 7`. The list still arrives. After the scan the log shows `Attempting WiFi reconnect...`, and the device connects without a reboot when the access point returns. | [ ] |
 | No saved network | A scan with no saved credentials is not followed by a reconnect line | [ ] |

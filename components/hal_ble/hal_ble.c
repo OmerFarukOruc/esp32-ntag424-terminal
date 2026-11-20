@@ -58,6 +58,10 @@ void ble_store_config_init(void);
 #define NOTIFY_RETRY_DELAY_MS 20
 /* ATT notification header: 1 byte opcode and 2 bytes handle (Bluetooth Core Spec, Vol 3, Part F, 3.4.7.1). */
 #define ATT_NOTIFY_OVERHEAD 3
+/* Common profile error codes (Core Specification Supplement, Part B); NimBLE does not define them. */
+#define ATT_ERR_WRITE_REQUEST_REJECTED 0xFC
+#define ATT_ERR_CCCD_IMPROPER 0xFD
+#define REPLY_MIN_MTU 100
 #define NAME_PREFIX "TERMINAL"
 #define NAME_SUFFIX_LEN 5  /* "-" and the last two Bluetooth MAC bytes in hex */
 #define ADV_INTERVAL_MS 100
@@ -94,6 +98,32 @@ static hal_ble_event_cb_t s_event_cb;
 static char s_device_name[sizeof(NAME_PREFIX) + NAME_SUFFIX_LEN];
 static char s_device_id[HAL_BLE_DEVICE_ID_MAX];
 static portMUX_TYPE s_id_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* Returns 0 when the client can receive the reply notification on chr, otherwise an ATT error code. */
+static int reply_possible(uint16_t conn_handle, notify_chr_t *chr)
+{
+    if (!atomic_load(&chr->subscribed)) {
+        ESP_LOGW(TAG, "Write refused: notifications are off on this characteristic");
+        return ATT_ERR_CCCD_IMPROPER;
+    }
+    uint16_t mtu = ble_att_mtu(conn_handle);
+    if (mtu < REPLY_MIN_MTU) {
+        ESP_LOGW(TAG, "Write refused: ATT MTU %u is below %d", mtu, REPLY_MIN_MTU);
+        return ATT_ERR_WRITE_REQUEST_REJECTED;
+    }
+    return 0;
+}
+
+/* Hands the request to the application. Returns 0 when it was queued, otherwise an ATT error code. */
+static int admit(hal_ble_event_t event, const void *data, size_t data_len)
+{
+    esp_err_t err = s_event_cb(event, data, data_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Request %d not queued: %s", (int)event, esp_err_to_name(err));
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return 0;
+}
 
 static int device_info_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                                   struct ble_gatt_access_ctxt *ctxt, void *arg);
@@ -286,16 +316,22 @@ static int device_info_chr_access(uint16_t conn_handle, uint16_t attr_handle,
 static int wifi_scan_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                                 struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    int att = reply_possible(conn_handle, &s_wifi_scan);
+    if (att != 0) {
+        return att;
+    }
     ESP_LOGI(TAG, "WiFi scan requested via BLE");
-    s_event_cb(HAL_BLE_EVENT_WIFI_SCAN_REQ, NULL, 0);
-    return 0;
+    return admit(HAL_BLE_EVENT_WIFI_SCAN_REQ, NULL, 0);
 }
 
 static int wifi_config_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                                   struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     cJSON *json = NULL;
-    int att = parse_json_write(ctxt->om, &json);
+    int att = reply_possible(conn_handle, &s_wifi_config);
+    if (att == 0) {
+        att = parse_json_write(ctxt->om, &json);
+    }
     if (att != 0) {
         return att;
     }
@@ -307,7 +343,7 @@ static int wifi_config_chr_access(uint16_t conn_handle, uint16_t attr_handle,
 
     if (att == 0) {
         ESP_LOGD(TAG, "WiFi config received: ssid %zu bytes", strlen(config.ssid));
-        s_event_cb(HAL_BLE_EVENT_WIFI_CONFIG, &config, sizeof(config));
+        att = admit(HAL_BLE_EVENT_WIFI_CONFIG, &config, sizeof(config));
     }
     explicit_bzero(&config, sizeof(config));
     return att;
@@ -317,7 +353,10 @@ static int url_set_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     cJSON *json = NULL;
-    int att = parse_json_write(ctxt->om, &json);
+    int att = reply_possible(conn_handle, &s_url_set);
+    if (att == 0) {
+        att = parse_json_write(ctxt->om, &json);
+    }
     if (att != 0) {
         return att;
     }
@@ -330,8 +369,7 @@ static int url_set_chr_access(uint16_t conn_handle, uint16_t attr_handle,
     }
 
     ESP_LOGI(TAG, "URL_SET: deviceId=%s", id);
-    s_event_cb(HAL_BLE_EVENT_URL_SET, id, strlen(id));
-    return 0;
+    return admit(HAL_BLE_EVENT_URL_SET, id, strlen(id));
 }
 
 static esp_err_t adv_start(void)

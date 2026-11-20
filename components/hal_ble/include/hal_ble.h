@@ -32,11 +32,15 @@
  * errors reach the client. DEVICE_INFO is readable without pairing.
  *
  * The client must enable notifications (CCCD) on a characteristic before it
- * writes to it. A send on a characteristic without notifications enabled
- * fails with ESP_ERR_INVALID_STATE. The client must request an ATT MTU of at least 100 bytes. The device
- * cannot start the MTU exchange itself, because the NimBLE GATT client needs
- * the central role, which this firmware turns off. With the default 23-byte MTU
- * every scan entry is skipped.
+ * writes to it, and a write without them fails with ATT error 0xFD (Client
+ * Characteristic Configuration Descriptor Improperly Configured). A send on a
+ * characteristic whose notifications the client turned off later fails with
+ * ESP_ERR_INVALID_STATE. The client must request an ATT MTU of at least 100
+ * bytes, and a write on a link with a smaller MTU fails with ATT error 0xFC
+ * (Write Request Rejected). The device cannot start the MTU exchange itself,
+ * because the NimBLE GATT client needs the central role, which this firmware
+ * turns off. A write the application cannot queue fails with ATT error 0x11
+ * (Insufficient Resources), so an acknowledged write always gets its reply.
  *
  * Writes are limited to 200 bytes. A write that is empty or over that limit
  * fails with ATT error 0x0D (Invalid Attribute Value Length). So does a
@@ -121,8 +125,10 @@ typedef struct {
  * @param event The BLE event that occurred
  * @param data Event-specific data (see hal_ble_event_t), NULL if not applicable
  * @param data_len Length of event data in bytes
+ * @return ESP_OK when the application took the request and will reply. Any
+ *         other value fails the write with ATT error 0x11.
  */
-typedef void (*hal_ble_event_cb_t)(hal_ble_event_t event, const void *data, size_t data_len);
+typedef esp_err_t (*hal_ble_event_cb_t)(hal_ble_event_t event, const void *data, size_t data_len);
 
 /**
  * @brief Initialize the BLE subsystem

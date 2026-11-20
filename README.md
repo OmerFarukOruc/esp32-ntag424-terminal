@@ -140,8 +140,9 @@ The three write characteristics need an encrypted link. The device pairs with LE
 
 - A write on an unencrypted link fails with an ATT error (ATT is the attribute protocol that GATT writes use). The code is `0x05` when the device has no stored key for the phone and `0x0F` when it has one. Both make the phone start pairing or encrypt the link, and the client repeats the write.
 - Writes use the acknowledged ATT write, so the client sees errors.
-- Enable notifications (the CCCD, the descriptor that switches notifications on) on a characteristic before you write to it. Without that, the device cannot send its reply and logs `Client has not enabled notifications on this characteristic`.
-- Request an ATT MTU (the largest packet the link carries) of at least 100 bytes. A notification must fit in MTU minus 3 bytes. The device cannot start the MTU exchange itself. With the default 23-byte MTU it skips every scan entry and cannot send the `done` notification either, so a client that waits for `done` waits forever.
+- Enable notifications (the CCCD, the descriptor that switches notifications on) on a characteristic before you write to it. Without that, the write fails with ATT error `0xFD`, because the device could not send its reply.
+- Request an ATT MTU (the largest packet the link carries) of at least 100 bytes. A notification must fit in MTU minus 3 bytes. The device cannot start the MTU exchange itself. With a smaller MTU, a write fails with ATT error `0xFC`.
+- An acknowledged write always gets its reply notification while the client stays connected. When the device cannot queue the request, the write fails with ATT error `0x11` and the client can repeat it.
 - A WIFI_CONFIG or URL_SET write may be at most 200 bytes.
 - When pairing fails, the device ends the connection. When a phone pairs again after it lost its bond, the device drops its old bond and accepts the new pairing.
 
@@ -154,6 +155,9 @@ ATT errors on a write:
 | `0x0D` | Invalid Attribute Value Length | A length is wrong, see below |
 | `0x13` | Value Not Allowed | The content is wrong, see below |
 | `0x0E` | Unlikely Error | The device could not copy the write |
+| `0x11` | Insufficient Resources | The device is busy and could not queue the request. Repeat the write. |
+| `0xFC` | Write Request Rejected | The ATT MTU is below 100 bytes |
+| `0xFD` | CCCD Improperly Configured | Notifications are off on this characteristic |
 
 The device returns `0x0D` in these cases.
 

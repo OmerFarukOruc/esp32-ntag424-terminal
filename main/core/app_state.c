@@ -175,19 +175,17 @@ static void wifi_event_callback(hal_wifi_state_t state)
 }
 
 /* Runs on the NimBLE host task: it only queues the request for the state task. */
-static void ble_event_callback(hal_ble_event_t event, const void *data, size_t data_len)
+static esp_err_t ble_event_callback(hal_ble_event_t event, const void *data, size_t data_len)
 {
     switch (event) {
     case HAL_BLE_EVENT_WIFI_SCAN_REQ:
-        app_post_event(APP_EVENT_WIFI_SCAN_REQUESTED, NULL, 0);
-        break;
+        return app_post_event(APP_EVENT_WIFI_SCAN_REQUESTED, NULL, 0);
     case HAL_BLE_EVENT_WIFI_CONFIG:
-        app_post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, data, data_len);
-        break;
+        return app_post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, data, data_len);
     case HAL_BLE_EVENT_URL_SET:
-        app_post_event(APP_EVENT_URL_SET, data, data_len);
-        break;
+        return app_post_event(APP_EVENT_URL_SET, data, data_len);
     }
+    return ESP_ERR_INVALID_ARG;
 }
 
 static void set_led(hal_led_pattern_t pattern)
