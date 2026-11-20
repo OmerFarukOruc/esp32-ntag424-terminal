@@ -188,6 +188,8 @@ jobs:
         run: . "$IDF_PATH/export.sh" && test/host/run.sh
       - name: Check the README verifier
         run: . "$IDF_PATH/export.sh" && python test/host/test_readme_verifier.py
+      - name: Check the release scripts
+        run: python3 test/host/test_release_bundle.py
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')

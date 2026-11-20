@@ -365,7 +365,7 @@ CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and 
 - `gitleaks` scans the full git history.
 - `build` runs in the `espressif/idf:v6.1` container once per configuration: `default` builds `sdkconfig.defaults`, and each other leg adds one `sdkconfig.ci.*` file on top. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build. Each leg fails when the build changes `dependencies.lock`, and restores its ccache folder from the GitHub Actions cache. Only runs on `main` save that folder, so pull requests and tags reuse the compiler output of the newest `main` run. The `default` leg uploads the firmware files and a release candidate (below).
 - `release-rebuild` builds the release candidate again from its source archive, in the same pinned image with Docker networking turned off, and fails when its version or its loaded firmware bytes differ from the release (below).
-- `host-tests` runs `test/host/run.sh` and `test/host/test_readme_verifier.py` in the same container.
+- `host-tests` runs `test/host/run.sh`, `test/host/test_readme_verifier.py` and `test/host/test_release_bundle.py` (the archive, ELF, descriptor, sdkconfig and label rules of the release scripts) in the same container.
 - `publish` runs only for a `v*` tag, and only after the other five jobs pass.
 
 The workflow pins each action to a commit SHA. Dependabot (`.github/dependabot.yml`) checks those actions once a week and groups the available version updates into one pull request with a `ci:` subject. A pull request with a single update names the action in its title, which can pass the 72-character subject limit, so shorten the title before the squash merge.
@@ -379,6 +379,8 @@ On every run, the `default` leg of `build` packages a release candidate with `sc
 `test/host/run.sh` builds the state machine, the BLE, network, NFC, power and button HALs, the PN532 driver wrapper and the vendored PN532 driver for the host with AddressSanitizer and UBSan, against stand-ins for ESP-IDF, FreeRTOS and NimBLE, and runs one suite per area. It needs gcc, cmake, the OpenSSL `libcrypto` headers, and the `managed_components/` folder that `idf.py build` or `idf.py reconfigure` creates. A passing run says nothing about the PN532, the tag, or the radio, because the stand-ins answer as the code expects.
 
 `test/host/test_readme_verifier.py` runs the `verify` function from the Python block above against the test vector and against `last_counter` values it must refuse. Run it in a shell where ESP-IDF is active, because the ESP-IDF Python ships the `cryptography` package: `source "${IDF_ACTIVATE:-$HOME/.espressif/tools/activate_idf_v6.1.sh}" && python test/host/test_readme_verifier.py`. Set `IDF_ACTIVATE` when your installation keeps the activation script elsewhere, as for `scripts/build.sh`.
+
+`test/host/test_release_bundle.py` checks the archive, ELF, descriptor, sdkconfig and label rules of `scripts/check_release.py` and `scripts/release_files.py` on archives and files it builds itself. It needs Python 3.11.4 or newer and no other package: `python3 test/host/test_release_bundle.py`.
 
 Agent and contributor rules are in [AGENTS.md](AGENTS.md). The checklist for testing on real hardware is [docs/hardware-test-runbook.md](docs/hardware-test-runbook.md).
 

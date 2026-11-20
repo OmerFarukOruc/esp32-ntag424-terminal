@@ -9,3 +9,6 @@ sdkconfig.old
 .cache/
 .vscode/
 .idea/
+
+# Python bytecode
+__pycache__/

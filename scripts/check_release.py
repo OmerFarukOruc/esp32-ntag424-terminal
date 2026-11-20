@@ -105,9 +105,9 @@ def extract(archive: Path, work: Path) -> Path:
             parts = PurePosixPath(m.name).parts
             if len(parts) < 2 or parts[0] != prefix or ".." in parts or not (m.isreg() or m.isdir()):
                 raise CheckError(f"archive member {m.name!r} is not a file or folder under {prefix}/")
-            if m.name in seen:
-                raise CheckError(f"archive member {m.name!r} appears twice")
-            seen.add(m.name)
+            if parts in seen:
+                raise CheckError(f"archive member {m.name!r} names a path that appears twice")
+            seen.add(parts)
         tar.extractall(work, members=members, filter="data")
     return work / prefix
 
