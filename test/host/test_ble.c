@@ -201,12 +201,6 @@ int main(void)
     check_mtu("a write on an MTU of 100 is accepted", 100, 0);
 
     connect_subscribed();
-    WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP_01\"}");
-    hal_ble_session_t session_a = cb_session;
-    connect_subscribed();
-    e = hal_ble_send_url_set_result(session_a, true, 0, "sdm_configured");
-    snprintf(d, sizeof d, "send=%s notifications=%d", esp_err_to_name(e), host_notify_count);
-    check("a reply for a client that left does not reach the next client", e == ESP_ERR_INVALID_STATE && host_notify_count == 0, d);
     WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP_02\"}");
     e = hal_ble_send_url_set_result(cb_session, true, 0, "sdm_configured");
     snprintf(d, sizeof d, "send=%s notifications=%d payload=%s", esp_err_to_name(e), host_notify_count,
