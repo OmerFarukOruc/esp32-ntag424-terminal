@@ -51,8 +51,6 @@ void ble_store_config_init(void);
 
 /* Chosen, not from a source: a 32-byte SSID and a 64-byte password with the JSON keys need about 120 bytes. */
 #define WRITE_MAX_LEN 200
-/* Chosen, not from a source: the largest notification is a scan entry of about 100 bytes. */
-#define NOTIFY_BUF_SIZE 256
 /* Chosen, not from a source: NimBLE returns BLE_HS_ENOMEM while its buffer pool is empty. */
 #define NOTIFY_SEND_ATTEMPTS 3
 #define NOTIFY_RETRY_DELAY_MS 20
@@ -671,7 +669,7 @@ static cJSON *built_or_null(cJSON *json, bool built)
  * host task. */
 static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON *json)
 {
-    char buf[NOTIFY_BUF_SIZE];
+    char *text = NULL;
     esp_err_t ret = ESP_OK;
     uint16_t conn = session_conn_handle(session);
 
@@ -684,15 +682,14 @@ static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON
     uint16_t mtu = ble_att_mtu(conn);
     ESP_GOTO_ON_FALSE(mtu != 0, ESP_ERR_INVALID_STATE, out, TAG, "BLE connection lost");
     size_t max_len = mtu > ATT_NOTIFY_OVERHEAD ? mtu - ATT_NOTIFY_OVERHEAD : 0;
-    if (max_len > sizeof(buf) - 1) {
-        max_len = sizeof(buf) - 1;
-    }
-    ESP_GOTO_ON_FALSE(max_len > 0 && cJSON_PrintPreallocated(json, buf, max_len + 1, false),
-                      ESP_ERR_INVALID_SIZE, out, TAG, "Notification exceeds ATT MTU - 3 (%zu bytes)", max_len);
+    text = cJSON_PrintUnformatted(json);
+    ESP_GOTO_ON_FALSE(text != NULL, ESP_ERR_NO_MEM, out, TAG, "Failed to serialize notification");
+    size_t len = strlen(text);
+    ESP_GOTO_ON_FALSE(len <= max_len, ESP_ERR_INVALID_SIZE, out, TAG,
+                      "Notification of %zu bytes exceeds ATT MTU - 3 (%zu bytes)", len, max_len);
 
-    size_t len = strlen(buf);
     for (int attempt = 1; attempt <= NOTIFY_SEND_ATTEMPTS; attempt++) {
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(buf, len);
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(text, len);
         ESP_GOTO_ON_FALSE(om != NULL, ESP_ERR_NO_MEM, out, TAG, "No mbuf for notification");
 
         int rc = ble_gatts_notify_custom(conn, chr->val_handle, om);
@@ -704,6 +701,7 @@ static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON
     }
 
 out:
+    cJSON_free(text);
     cJSON_Delete(json);
     return ret;
 }
@@ -734,6 +732,7 @@ esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_bl
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "scan result %zu of %zu not sent: %s", i + 1, count, esp_err_to_name(err));
             first_err = err;
+            skipped += count - i;
             break;
         }
         sent++;

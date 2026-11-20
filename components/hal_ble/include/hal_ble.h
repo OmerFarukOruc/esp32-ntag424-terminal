@@ -64,9 +64,10 @@
  * - WIFI_SCAN: one notification per network, each one JSON object
  *   {"ssid":"..","rssi":-52,"sec":"WPA2","ch":6}, then a terminator
  *   {"done":true,"count":N,"skipped":M}. "count" is the number of network
- *   notifications sent and "skipped" the number that did not fit in
- *   ATT MTU - 3 bytes. An empty scan sends only the terminator
- *   with count 0. The client treats the scan as complete on "done".
+ *   notifications sent and "skipped" the number not sent, because their
+ *   JSON did not fit in ATT MTU - 3 bytes or a send failed. count + skipped
+ *   is the number of networks found. An empty scan sends only the
+ *   terminator with count 0. The client treats the scan as complete on "done".
  * - WIFI_CONFIG: {"success":bool,"ip":"..","msg":".."} after the connect
  *   attempt.
  * - URL_SET: {"success":bool,"code":int,"message":".."} after the SDM

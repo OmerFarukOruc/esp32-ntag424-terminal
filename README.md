@@ -198,7 +198,7 @@ A final notification ends the scan:
 {"done":true,"count":4,"skipped":0}
 ```
 
-`count` is the number of network notifications sent. `skipped` is the number of networks whose JSON did not fit in MTU minus 3 bytes. A failed or empty scan sends only the terminator with `count` 0. The client treats the scan as complete when it sees `done`.
+`count` is the number of network notifications sent. `skipped` is the number of networks not sent, because their JSON did not fit in MTU minus 3 bytes or a send failed, so `count` plus `skipped` is the number of networks found. A failed or empty scan sends only the terminator with `count` 0. The client treats the scan as complete when it sees `done`.
 
 The device runs a scan only during onboarding. Outside onboarding it answers with the empty terminator at once, and it ignores a request while a scan runs.
 
