@@ -73,6 +73,8 @@ esp_err_t hal_network_init(void);
 /**
  * @brief Deinitialize the network HAL
  *
+ * Do not call it while hal_wifi_scan() runs.
+ *
  * The registered callback stays registered for the next init.
  *
  * @return esp_err_t ESP_OK on success

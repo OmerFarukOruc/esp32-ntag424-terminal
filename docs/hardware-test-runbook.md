@@ -446,6 +446,7 @@ The monitor samples every 30 s. Raise or lower the supply to test the levels.
 | One low sample | A single reading below 3100 mV followed by a normal one does not put the device to sleep | [ ] |
 | Critical (below 3100 mV) | Two readings in a row, 30 s apart, give `hal_power: Battery level changed: <old> -> 0`, `Critical battery, entering deep sleep`, and `hal_power: Entering deep sleep`. BLE, WiFi, and SNTP stop first. Only a reset or a power cycle wakes the device. | [ ] |
 | Critical during a tag write | `Deep sleep postponed: a tag write is running`. The device sleeps after the write result. | [ ] |
+| Critical during a WiFi scan | `Deep sleep postponed: a scan is running`. The device sleeps after the scan terminator. | [ ] |
 
 The level numbers in the log are 0 critical, 1 low, 2 medium, and 3 normal.
 

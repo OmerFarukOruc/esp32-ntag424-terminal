@@ -427,7 +427,10 @@ fail:
 
 hal_wifi_state_t hal_wifi_get_state(void)
 {
-    return s_network.state;
+    portENTER_CRITICAL(&s_lock);
+    hal_wifi_state_t state = s_network.state;
+    portEXIT_CRITICAL(&s_lock);
+    return state;
 }
 
 void hal_wifi_register_callback(hal_wifi_event_cb_t callback)

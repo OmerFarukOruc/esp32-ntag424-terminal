@@ -83,13 +83,14 @@ static const char *const s_event_names[APP_EVENT_COUNT] = {
     [APP_EVENT_WIFI_SCAN_REQUESTED] = "WIFI_SCAN_REQUESTED",
     [APP_EVENT_URL_SET] = "URL_SET",
     [APP_EVENT_URL_SET_DONE] = "URL_SET_DONE",
+    [APP_EVENT_WIFI_SCAN_DONE] = "WIFI_SCAN_DONE",
     [APP_EVENT_LOW_BATTERY] = "LOW_BATTERY",
     [APP_EVENT_CRITICAL_BATTERY] = "CRITICAL_BATTERY",
 };
 
 /* Only the state task reads or writes these. */
 static app_state_t s_state = APP_STATE_INIT;
-static bool s_critical_battery_pending;  /* The tag write refused a deep sleep */
+static bool s_critical_battery_pending;  /* A tag write or a scan postponed the deep sleep */
 static bool s_low_battery_pending;       /* The warning came outside IDLE */
 static hal_ble_session_t s_wifi_session = HAL_BLE_SESSION_NONE;  /* The client waiting for the WiFi result */
 
@@ -311,9 +312,15 @@ static void factory_reset(void)
     esp_restart();
 }
 
-/* Critical battery: stop the radios and sleep. Only a reset wakes the device. */
-static void power_down(void)
+/* Critical battery: stop the radios and sleep. Only a reset wakes the device. A tag write or a scan
+ * still uses them, so the sleep waits for the task to report back. */
+static void power_down_when_idle(void)
 {
+    if (s_state == APP_STATE_WRITING_TAG || app_wifi_scan_running()) {
+        ESP_LOGW(TAG, "Deep sleep postponed: a %s is running", s_state == APP_STATE_WRITING_TAG ? "tag write" : "scan");
+        s_critical_battery_pending = true;
+        return;
+    }
     ESP_LOGW(TAG, "Critical battery, entering deep sleep");
     hal_time_stop_sync();
     hal_ble_deinit();
@@ -353,7 +360,7 @@ static void handle_wifi_config(hal_ble_session_t session, const void *data, size
     transition_to(APP_STATE_CONNECTING_WIFI, APP_EVENT_WIFI_CONFIG_RECEIVED);
 }
 
-/* The tag task reported. A deep sleep that came in during the write runs now. */
+/* The tag task reported. A deep sleep that came in during the write runs now unless a scan runs. */
 static void finish_tag_write(const void *data)
 {
     hal_nfc_err_t nfc_err;
@@ -366,7 +373,7 @@ static void finish_tag_write(const void *data)
         play(success ? BUZZER_SOUND_SUCCESS : BUZZER_SOUND_NETWORK_ERROR);
     }
     if (s_critical_battery_pending) {
-        power_down();
+        power_down_when_idle();
     }
 }
 
@@ -472,12 +479,7 @@ static void handle_event(const event_msg_t *msg)
         }
         return;
     case APP_EVENT_CRITICAL_BATTERY:
-        if (s_state == APP_STATE_WRITING_TAG) {
-            ESP_LOGW(TAG, "Deep sleep postponed: a tag write is running");
-            s_critical_battery_pending = true;
-        } else {
-            power_down();
-        }
+        power_down_when_idle();
         return;
     case APP_EVENT_LOW_BATTERY:
         if (s_state == APP_STATE_IDLE) {
@@ -488,6 +490,12 @@ static void handle_event(const event_msg_t *msg)
         return;
     case APP_EVENT_URL_SET_DONE:
         finish_tag_write(msg->data);
+        return;
+    case APP_EVENT_WIFI_SCAN_DONE:
+        app_wifi_scan_done();
+        if (s_critical_battery_pending) {
+            power_down_when_idle();
+        }
         return;
     case APP_EVENT_WIFI_CONNECTED:
         ESP_ERROR_CHECK_WITHOUT_ABORT(hal_time_start_sync());

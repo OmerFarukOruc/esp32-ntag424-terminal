@@ -259,7 +259,8 @@ esp_err_t hal_ble_send_url_set_result(hal_ble_session_t session, bool success, i
 /**
  * @brief Deinitialize the BLE subsystem
  *
- * Stops advertising, disconnects clients, and frees resources.
+ * Stops advertising, disconnects clients, and frees resources. Do not call it
+ * while a hal_ble_send_*() call runs on another task.
  *
  * @return ESP_OK on success, error code otherwise
  */
