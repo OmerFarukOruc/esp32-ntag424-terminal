@@ -175,12 +175,15 @@ bool app_url_set_finish(hal_nfc_err_t nfc_err)
     if (success) {
         /* The id belongs to the tag, so it is stored only after the tag accepted it. */
         esp_err_t err = save_device_id(s_job.device_id);
-        if (err == ESP_OK) {
-            err = hal_ble_set_device_id(s_job.device_id);
-        }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Storing device id %s failed: %s", s_job.device_id, esp_err_to_name(err));
+            ESP_LOGE(TAG, "Tag holds device id %s, but saving it failed: %s", s_job.device_id, esp_err_to_name(err));
+            result = RESULT(URL_SET_FAILED, "tag_configured_id_not_saved");
+        } else if ((err = hal_ble_set_device_id(s_job.device_id)) != ESP_OK) {
+            ESP_LOGE(TAG, "Tag holds device id %s, but DEVICE_INFO still shows the old one: %s", s_job.device_id,
+                     esp_err_to_name(err));
+            result = RESULT(URL_SET_FAILED, "tag_configured_id_not_published");
         }
+        success = (result.code == URL_SET_OK);
     }
 
     if (ble_connected_end) {

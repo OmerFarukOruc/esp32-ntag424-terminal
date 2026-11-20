@@ -281,6 +281,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | An NTAG424 DNA whose file 02 change right is not key 0 | Code 1007 `unsupported_tag_capability` after one attempt, log `SDM config: file 02 has type 0, <n> bytes and change key <k>`, and the tag content is unchanged | [ ] |
 | PN532 TX wire unplugged after boot | Code 1003 `pn532_unresponsive` after several seconds, with `SDM config: PN532 unavailable after recovery` | [ ] |
 | Wire plugged in again, same request | Success without a reboot, because the firmware re-initializes the PN532. Not confirmed on hardware. | [ ] |
+| NVS full during a write | With the NVS partition full, a write to a good tag ends with code 1099 `tag_configured_id_not_saved`, log `Tag holds device id <id>, but saving it failed: <error>`, the error LED and sound, and DEVICE_INFO keeps the old id | [ ] |
 | Second URL_SET while one runs | At once, code 1099 `nfc_config_busy`, log `URL_SET rejected: nfc_config_busy` | [ ] |
 | WIFI_CONFIG during the write | Notification `{"success":false,"ip":"","msg":"WiFi connection failed"}`, log `WiFi config rejected: a tag write is running`, and the write goes on | [ ] |
 | Disconnect the BLE client during the write | The write still ends, log `URL_SET attempt #<n>: BLE disconnected before the result, not sent` | [ ] |
