@@ -41,6 +41,7 @@ struct host_trace {
     int32_t last_url_code;
     char last_url_msg[64];
     int32_t diag_result_code;
+    int diag_queue_overflows;
     int connects;
     int scans;
     int nfc_writes;

@@ -26,6 +26,9 @@ struct host_timer *host_timer_named(const char *name);
 bool host_timer_fire(struct host_timer *t);
 
 int host_tasks_alive(void);
+extern int host_task_wakeups;
+extern jmp_buf *host_task_blocks;
+extern void (*host_on_delay)(void);
 void host_run_tasks(void);
 unsigned char *host_queue_storage(QueueHandle_t q, size_t *bytes);
 

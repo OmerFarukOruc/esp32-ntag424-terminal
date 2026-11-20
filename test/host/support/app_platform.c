@@ -258,6 +258,7 @@ void hal_diagnostics_record_transition(uint8_t from, uint8_t to, uint8_t event)
 
 void hal_diagnostics_record_queue_overflow(void)
 {
+    trace.diag_queue_overflows++;
 }
 
 void hal_diagnostics_record_url_set_attempt(const hal_diagnostics_url_set_t *a)
