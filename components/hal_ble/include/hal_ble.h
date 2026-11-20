@@ -48,15 +48,19 @@
  * application handles it starts nothing and gets no reply. A sent reply means
  * the NimBLE stack accepted the notification, not that the phone received it.
  *
- * Writes are limited to 200 bytes. A write that is empty or over that limit
- * fails with ATT error 0x0D (Invalid Attribute Value Length). So does a
- * WIFI_CONFIG with an empty SSID, an SSID over 32 bytes or a password over 64
- * bytes, and a URL_SET with an empty deviceId or one over 31 bytes. A write
- * that is not one JSON value with only whitespace after it, holds a NUL
- * character (raw or as the escape \u0000), lacks a string "ssid"
- * (WIFI_CONFIG) or "deviceId" (URL_SET), or has a "password" that is not a
- * string, fails with ATT error 0x13 (Value Not Allowed). A WIFI_CONFIG
- * without "password" selects an open network.
+ * WIFI_SCAN accepts any write. WIFI_CONFIG and URL_SET writes are limited to
+ * 200 bytes, and one that is empty or over that limit fails with ATT error
+ * 0x0D (Invalid Attribute Value Length). So does a WIFI_CONFIG with an empty
+ * SSID, an SSID over 32 bytes or a password over 64 bytes, and a URL_SET with
+ * an empty deviceId or one over 31 bytes. A WIFI_CONFIG or URL_SET write that
+ * is not one JSON object with only whitespace after it, repeats a top-level
+ * member name (compared after unescaping and case-sensitively, so
+ * "device\u0049d" repeats "deviceId"), or holds a NUL character (raw or as the
+ * escape \u0000) fails with ATT error 0x13 (Value Not Allowed). So does a
+ * WIFI_CONFIG without a string "ssid" or with a "password" that is not a
+ * string, and a URL_SET without a string "deviceId". Other members whose
+ * top-level names are unique are ignored, nested objects included. A
+ * WIFI_CONFIG without "password" selects an open network.
  *
  * The advertised name is "TERMINAL-XXXX" with the last two Bluetooth MAC bytes
  * in hex, for example "TERMINAL-84F2". The advertising interval is 100 ms.

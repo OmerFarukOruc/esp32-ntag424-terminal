@@ -194,8 +194,9 @@ Expect `hal_ble: BLE connected, conn_handle=<n>` and `MTU update: conn_handle=<n
 | Notifications before pairing | Enabling notifications fails with the same ATT errors as a write | [ ] |
 | Pairing | Just Works, no passkey prompt | [ ] |
 | Write after pairing | Accepted | [ ] |
-| Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not one JSON value (<n> bytes)` | [ ] |
+| Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not one JSON object (<n> bytes)` | [ ] |
 | Bytes after the JSON | `{"deviceId":"SHOP"} x` to URL_SET fails with ATT error `0x13` and the same log line | [ ] |
+| Repeated member name | `{"deviceId":"FIRST","deviceId":"SECOND"}` to URL_SET fails with ATT error `0x13`, log `Write repeats a member name (<n> bytes)` | [ ] |
 | NUL character | `{"deviceId":"SHOP\u0000X"}` to URL_SET fails with ATT error `0x13`, log `Write holds a NUL character` | [ ] |
 | Bad escape | `{"deviceId":"AB\uZZZZCD"}` to URL_SET fails with ATT error `0x13`, log `Write holds a \u escape without 4 hex digits` | [ ] |
 | Control byte | `{"deviceId":"SHOP"}` followed by the byte `0x01` to URL_SET fails with ATT error `0x13`, log `Write holds a control character` | [ ] |
