@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Usage: test/host/run.sh [suite...]
 # Builds each suite with the host gcc, AddressSanitizer and UBSan, runs it, and exits non-zero when a check fails.
-# Needs gcc, the OpenSSL libcrypto headers, and managed_components/ from an idf.py build or reconfigure.
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -44,6 +43,7 @@ build() {
             "$host/support/crypto_openssl.c" "$host/support/nfc_reader_errors.c" "$host/support/platform.c" "${crypto[@]}" "$@"
         ;;
     sdm)
+        cmake -P "$host/test_sdm_url.cmake" || return 1
         gcc "${cflags[@]}" "${nfc_inc[@]}" "$host/test_sdm.c" "$host/support/uart.c" "$host/support/gpio.c" "$nfc/hal_nfc.c" \
             "$nfc/ntag424_sdm.c" "$nfc/desfire_ev2.c" "$host/support/nfc_reader_errors.c" "$host/support/platform.c" "$@"
         ;;

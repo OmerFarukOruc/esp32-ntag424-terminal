@@ -260,21 +260,32 @@ out:
     return ret;
 }
 
-hal_nfc_err_t nfc_ev2_get_version(uint8_t hw_version[NFC_VERSION_HW_LEN])
-{
-    uint8_t part[NFC_VERSION_PART_MAX_LEN];
-    size_t len = sizeof(part);
-    hal_nfc_err_t err = desfire_send_cmd(DESFIRE_INS_GET_VERSION, NULL, 0, DESFIRE_STATUS_MORE, part, &len);
-    ESP_RETURN_ON_FALSE(err == HAL_NFC_OK, err, TAG, "GetVersion failed (%d)", err);
-    ESP_RETURN_ON_FALSE(len == NFC_VERSION_HW_LEN, HAL_NFC_ERR_COMM, TAG,
-                        "GetVersion hardware part of %u bytes", (unsigned)len);
-    memcpy(hw_version, part, NFC_VERSION_HW_LEN);
+#define NFC_VERSION_PART_LONGEST    14
+#define NFC_VERSION_PART_BUF        (NFC_VERSION_PART_LONGEST + 1)
+_Static_assert(sizeof(((nfc_version_t *)0)->production) == NFC_VERSION_PART_LONGEST, "production part size");
 
-    len = sizeof(part);
-    err = desfire_send_cmd(DESFIRE_INS_ADDITIONAL_FRAME, NULL, 0, DESFIRE_STATUS_MORE, part, &len);
+static hal_nfc_err_t get_version_part(uint8_t ins, uint8_t expect_sw2, uint8_t *out, size_t want)
+{
+    uint8_t part[NFC_VERSION_PART_BUF];
+    size_t len = sizeof(part);
+    hal_nfc_err_t err = desfire_send_cmd(ins, NULL, 0, expect_sw2, part, &len);
+    ESP_RETURN_ON_FALSE(err == HAL_NFC_OK, err, TAG, "GetVersion failed (%d)", err);
+    ESP_RETURN_ON_FALSE(len == want, HAL_NFC_ERR_COMM, TAG, "GetVersion part of %u bytes, expected %u",
+                        (unsigned)len, (unsigned)want);
+    memcpy(out, part, want);
+    return HAL_NFC_OK;
+}
+
+hal_nfc_err_t nfc_ev2_get_version(nfc_version_t *version)
+{
+    hal_nfc_err_t err = get_version_part(DESFIRE_INS_GET_VERSION, DESFIRE_STATUS_MORE, version->hw,
+                                         sizeof(version->hw));
     if (err == HAL_NFC_OK) {
-        len = sizeof(part);
-        err = desfire_send_cmd(DESFIRE_INS_ADDITIONAL_FRAME, NULL, 0, DESFIRE_STATUS_OK, part, &len);
+        err = get_version_part(DESFIRE_INS_ADDITIONAL_FRAME, DESFIRE_STATUS_MORE, version->sw, sizeof(version->sw));
+    }
+    if (err == HAL_NFC_OK) {
+        err = get_version_part(DESFIRE_INS_ADDITIONAL_FRAME, DESFIRE_STATUS_OK, version->production,
+                               sizeof(version->production));
     }
     return err;
 }

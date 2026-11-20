@@ -45,6 +45,39 @@ static uint8_t written[NFC_MAX_NDEF_LEN];
 static size_t written_len;
 static uint8_t settings_block[SETTINGS_LEN];
 
+#define UID_A { 7, 0x04, 0x51, 0x2A, 0x6B, 0x1C, 0x7D, 0x80 }
+#define UID_B { 7, 0x04, 0x52, 0x2A, 0x6B, 0x1C, 0x7D, 0x81 }
+#define TAGS_MAX 4
+static uint8_t tag_uids[TAGS_MAX][8];
+static int tag_count;
+static int tag_now;
+static int writes_to[TAGS_MAX];
+static uint8_t fs_answer[32];
+static size_t fs_answer_len;
+static size_t version_len[3];
+static uint8_t version_sw2[3];
+static int settings_fails_left;
+static const uint8_t *production_uid;
+static int no_ndef_tag;
+static uint32_t run_timeout_ms;
+
+static void tags(int count, const uint8_t (*uids)[8])
+{
+    tag_count = count;
+    memcpy(tag_uids, uids, sizeof tag_uids[0] * count);
+}
+
+static void file_settings(const uint8_t *answer, size_t len)
+{
+    memcpy(fs_answer, answer, len);
+    fs_answer_len = len;
+}
+
+uint8_t *pn532_nfcid(pn532_t *p, char text[21])
+{
+    return tag_uids[tag_now];
+}
+
 pn532_t *nfc_reader_open(void)
 {
     return NULL;
@@ -70,6 +103,7 @@ hal_nfc_err_t nfc_reader_detect_tag(uint32_t ms)
     }
     host_now_us += (int64_t)(ms - 100) * 1000;
     tag_active = true;
+    tag_now = detect_calls - success_detect_call < tag_count ? detect_calls - success_detect_call : tag_count - 1;
     return HAL_NFC_OK;
 }
 
@@ -144,11 +178,17 @@ int pn532_dx(void *p, unsigned int len, uint8_t *buf, unsigned int max, const ch
             *errstr = "protocol error";
             return -1;
         }
+        if (tag_now == no_ndef_tag) {
+            return answer(buf, NULL, 0, 0x6A, 0x82);
+        }
         return answer(buf, NULL, 0, 0x90, 0x00);
     }
     switch (ins) {
     case 0xF5: {
         host_now_us += 50000;
+        if (fs_answer_len > 0) {
+            return answer(buf, fs_answer, (int)fs_answer_len, 0x91, 0x00);
+        }
         const uint8_t fs[7] = { 0x00, 0x00, file_access0, 0xEE, 0x00, 0x01, 0x00 };
         return answer(buf, fs, 7, 0x91, 0x00);
     }
@@ -158,20 +198,22 @@ int pn532_dx(void *p, unsigned int len, uint8_t *buf, unsigned int max, const ch
     case 0x60: {
         host_now_us += 20000;
         version_frame = 1;
-        const uint8_t hw[7] = { hw_vendor, hw_type, 0x02, hw_major, 0x00, 0x11, 0x05 };
-        return answer(buf, hw, 7, 0x91, 0xAF);
+        const uint8_t hw[8] = { hw_vendor, hw_type, 0x02, hw_major, 0x00, 0x11, 0x05 };
+        return answer(buf, hw, (int)version_len[0], 0x91, version_sw2[0]);
     }
     case 0xAF: {
         if (version_frame == 1) {
             host_now_us += 20000;
             version_frame = 2;
-            const uint8_t sw[7] = { hw_vendor, hw_type, 0x02, 0x01, 0x02, 0x11, 0x05 };
-            return answer(buf, sw, 7, 0x91, 0xAF);
+            const uint8_t sw[8] = { hw_vendor, hw_type, 0x02, 0x01, 0x02, 0x11, 0x05 };
+            return answer(buf, sw, (int)version_len[1], 0x91, version_sw2[1]);
         }
         if (version_frame == 2) {
             host_now_us += 20000;
             version_frame = 0;
-            return answer(buf, zeros, 14, 0x91, 0x00);
+            uint8_t production[16] = {0};
+            memcpy(production, production_uid != NULL ? production_uid : &tag_uids[tag_now][1], 7);
+            return answer(buf, production, (int)version_len[2], 0x91, version_sw2[2]);
         }
         host_now_us += 200000;
         uint8_t r[32] = { 0x9D, 0x00, 0xC4, 0xDF };
@@ -183,6 +225,7 @@ int pn532_dx(void *p, unsigned int len, uint8_t *buf, unsigned int max, const ch
     case 0x8D:
         host_now_us += 200000;
         writes++;
+        writes_to[tag_now]++;
         write_order = commands;
         written_len = buf[9] | (buf[10] << 8) | ((size_t)buf[11] << 16);
         memcpy(written, &buf[WRITE_DATA_OFFSET], written_len);
@@ -192,6 +235,11 @@ int pn532_dx(void *p, unsigned int len, uint8_t *buf, unsigned int max, const ch
         settings++;
         settings_order = commands;
         memcpy(settings_block, &buf[SETTINGS_OFFSET], SETTINGS_LEN);
+        if (settings_fails_left > 0) {
+            settings_fails_left--;
+            *errstr = "no answer";
+            return -1;
+        }
         if ((file_access0 & 0x0F) != 0) {
             return answer(buf, NULL, 0, 0x91, 0x9D);
         }
@@ -229,12 +277,28 @@ static hal_nfc_err_t run(int succeed_on, uint32_t recover_ms, int reinits, int s
     file_access0 = access0;
     tag_active = false;
     version_frame = 0;
+    memset(writes_to, 0, sizeof writes_to);
     g_nfc.pn532 = (pn532_t *)1;
     if (g_nfc.mutex == NULL) {
         g_nfc.mutex = xSemaphoreCreateMutex();
     }
-    deadline_us = host_now_us + 30000000;
-    return hal_nfc_ntag424_configure_sdm("TEST123", 30000);
+    deadline_us = host_now_us + (int64_t)run_timeout_ms * 1000;
+    return hal_nfc_ntag424_configure_sdm("TEST123", run_timeout_ms);
+}
+
+static void defaults(void)
+{
+    static const uint8_t a[1][8] = { UID_A };
+    tags(1, a);
+    fs_answer_len = 0;
+    settings_fails_left = 0;
+    production_uid = NULL;
+    no_ndef_tag = -1;
+    run_timeout_ms = 30000;
+    const size_t lens[3] = { 7, 7, 14 };
+    const uint8_t sw2[3] = { 0xAF, 0xAF, 0x00 };
+    memcpy(version_len, lens, sizeof lens);
+    memcpy(version_sw2, sw2, sizeof sw2);
 }
 
 static void hex_text(const uint8_t *b, size_t n, char *out)
@@ -247,6 +311,7 @@ static void hex_text(const uint8_t *b, size_t n, char *out)
 int main(void)
 {
     char d[300];
+    defaults();
     struct {
         const char *label;
         int succeed_on;
@@ -311,6 +376,125 @@ int main(void)
     hw_vendor = VENDOR_NXP;
     hw_type = TYPE_NTAG;
     hw_major = MAJOR_NTAG424;
+
+    struct {
+        const char *name;
+        uint8_t answer[24];
+        size_t len;
+        hal_nfc_err_t want;
+    } profiles[] = {
+        {
+            "a file 02 that anyone may change is refused before WriteData",
+            { 0x00, 0x00, 0xEE, 0xEE, 0x00, 0x01, 0x00 }, 7, HAL_NFC_ERR_NOT_SUPPORTED
+        },
+        {
+            "a file 02 in full communication mode is refused before WriteData",
+            { 0x00, 0x03, 0x00, 0xE0, 0x00, 0x01, 0x00 }, 7, HAL_NFC_ERR_NOT_SUPPORTED
+        },
+        {
+            "a file 02 in MAC communication mode is refused before WriteData",
+            { 0x00, 0x01, 0x00, 0xE0, 0x00, 0x01, 0x00 }, 7, HAL_NFC_ERR_NOT_SUPPORTED
+        },
+    };
+    for (size_t i = 0; i < sizeof profiles / sizeof profiles[0]; i++) {
+        defaults();
+        file_settings(profiles[i].answer, profiles[i].len);
+        r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+        snprintf(d, sizeof d, "result=%d writes=%d settings=%d", r, writes, settings);
+        check(profiles[i].name, writes == 0 && settings == 0 && r == profiles[i].want, d);
+    }
+
+    defaults();
+    const uint8_t configured[] = { 0x00, 0x40, 0x00, 0xE0, 0x00, 0x01, 0x00, 0xC1, 0xFF, 0x22,
+                                   0x20, 0x00, 0x00, 0x46, 0x00, 0x00, 0x46, 0x00, 0x00
+                                 };
+    file_settings(configured, sizeof configured);
+    r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+    hex_text(settings_block, SETTINGS_LEN, got);
+    snprintf(d, sizeof d, "result=%d writes=%d settings=%s", r, writes, got);
+    check("a tag this terminal configured before gets the new URL and offsets",
+          r == HAL_NFC_OK && writes == 1 && memcmp(settings_block, EXPECTED_SETTINGS, SETTINGS_LEN) == 0, d);
+
+    static const uint8_t a_then_b[2][8] = { UID_A, UID_B };
+    defaults();
+    tags(2, a_then_b);
+    run_timeout_ms = 120000;
+    r = run(1, 0, 1, 1, ACCESS_CHANGE_KEY_0);
+    snprintf(d, sizeof d, "result=%d detects=%d, writes to A=%d, to B=%d", r, detect_calls, writes_to[0], writes_to[1]);
+    check("a different tag found after a PN532 re-init gets no write",
+          detect_calls >= 2 && writes_to[1] == 0 && r == HAL_NFC_ERR_COMM, d);
+
+    defaults();
+    tags(2, a_then_b);
+    settings_fails_left = 1;
+    run_timeout_ms = 120000;
+    r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+    snprintf(d, sizeof d, "result=%d detects=%d, writes to A=%d, to B=%d", r, detect_calls, writes_to[0], writes_to[1]);
+    check("a different tag found after a write to the first one failed halfway gets no write",
+          detect_calls >= 2 && writes_to[0] == 1 && writes_to[1] == 0 && r == HAL_NFC_ERR_COMM, d);
+
+    static const uint8_t a_b_a[3][8] = { UID_A, UID_B, UID_A };
+    defaults();
+    tags(3, a_b_a);
+    no_ndef_tag = 1;
+    settings_fails_left = 1;
+    run_timeout_ms = 120000;
+    r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+    snprintf(d, sizeof d, "result=%d detects=%d, writes to A=%d+%d, to B=%d", r, detect_calls, writes_to[0],
+             writes_to[2], writes_to[1]);
+    check("a write that a tag without the NDEF application interrupted finishes when the first tag returns",
+          r == HAL_NFC_OK && writes_to[0] == 1 && writes_to[1] == 0 && writes_to[2] == 1, d);
+
+    static const struct {
+        const char *name;
+        uint8_t uid[8];
+    } uids[] = {
+        { "a tag with a 4-byte random UID is refused before WriteData", { 4, 0x08, 0x12, 0x34, 0x56 } },
+        { "a tag that reports no UID is refused before WriteData", { 0 } },
+        { "a tag whose UID is all zeros is refused before WriteData", { 7 } },
+    };
+    for (size_t i = 0; i < sizeof uids / sizeof uids[0]; i++) {
+        defaults();
+        tags(1, &uids[i].uid);
+        r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+        snprintf(d, sizeof d, "result=%d writes=%d", r, writes);
+        check(uids[i].name, writes == 0 && r == HAL_NFC_ERR_NOT_SUPPORTED, d);
+    }
+
+    static const struct {
+        const char *name;
+        size_t len[3];
+        uint8_t sw2[3];
+    } versions[] = {
+        { "a GetVersion hardware part of 6 bytes is refused before WriteData", { 6, 7, 14 }, { 0xAF, 0xAF, 0x00 } },
+        { "a GetVersion hardware part of 8 bytes is refused before WriteData", { 8, 7, 14 }, { 0xAF, 0xAF, 0x00 } },
+        { "a GetVersion software part of 6 bytes is refused before WriteData", { 7, 6, 14 }, { 0xAF, 0xAF, 0x00 } },
+        { "a GetVersion software part of 8 bytes is refused before WriteData", { 7, 8, 14 }, { 0xAF, 0xAF, 0x00 } },
+        { "a GetVersion production part of 13 bytes is refused before WriteData", { 7, 7, 13 }, { 0xAF, 0xAF, 0x00 } },
+        { "a GetVersion production part of 15 bytes is refused before WriteData", { 7, 7, 15 }, { 0xAF, 0xAF, 0x00 } },
+        { "a GetVersion that ends after the hardware part is refused before WriteData", { 7, 7, 14 }, { 0x00, 0xAF, 0x00 } },
+        { "a GetVersion that ends after the software part is refused before WriteData", { 7, 7, 14 }, { 0xAF, 0x00, 0x00 } },
+        { "a GetVersion that goes on after the production part is refused before WriteData", { 7, 7, 14 }, { 0xAF, 0xAF, 0xAF } },
+    };
+    for (size_t i = 0; i < sizeof versions / sizeof versions[0]; i++) {
+        defaults();
+        memcpy(version_len, versions[i].len, sizeof version_len);
+        memcpy(version_sw2, versions[i].sw2, sizeof version_sw2);
+        run_timeout_ms = 120000;
+        r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+        snprintf(d, sizeof d, "result=%d writes=%d", r, writes);
+        check(versions[i].name, writes == 0 && r == HAL_NFC_ERR_COMM, d);
+    }
+
+    defaults();
+    static const uint8_t other_uid[8] = UID_B;
+    production_uid = &other_uid[1];
+    run_timeout_ms = 120000;
+    r = run(1, 0, 0, 0, ACCESS_CHANGE_KEY_0);
+    snprintf(d, sizeof d, "result=%d writes=%d", r, writes);
+    check("a tag whose GetVersion reports another UID than its activation is refused before WriteData",
+          writes == 0 && r == HAL_NFC_ERR_COMM, d);
+    defaults();
 
     struct {
         const char *id;
