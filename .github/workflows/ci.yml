@@ -53,6 +53,7 @@ jobs:
           "$RUNNER_TEMP/gitleaks" git --redact --verbose
 
   build:
+    name: build (${{ matrix.config }})
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
