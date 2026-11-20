@@ -353,13 +353,13 @@ hal_network: New credentials failed 3 times (reason <n>), giving up
 
 | Check | Expected | Status |
 |-------|----------|--------|
-| Notification | `{"success":false,"ip":"","msg":"WiFi connection failed"}` after 3 attempts, which takes a few tens of seconds | [ ] |
+| Notification | `{"success":false,"ip":"","msg":"WiFi connection failed"}` after the 3rd failed attempt whose reason points at the credentials (normally the 3rd attempt), which takes a few tens of seconds | [ ] |
 | After the failure | The device returns to idle and does not retry until a reboot or new credentials | [ ] |
 | Reboot | The driver stored the failed credentials, so the device tries them again at boot | [ ] |
 | Right password after the failure | Connects | [ ] |
 | Access point lost after a working connection | The device keeps retrying with backoff and does not give up early (see test 2) | [ ] |
 
-A password of 1 to 7 bytes gets the failure notification at once, the log shows `Password must be empty or 8 to 64 bytes`, and the current connection stays up. When the WiFi driver rejects the credentials at once, the failure notification also arrives at once and the log shows `WiFi connect failed to start: <error>`. Any failure that does not point at the credentials follows the 10 attempt rule and takes about 3 minutes.
+A password of 1 to 7 bytes gets the failure notification at once, the log shows `Password must be empty or 8 to 64 bytes`, and the current connection stays up. When the WiFi driver rejects the credentials at once, the failure notification also arrives at once and the log shows `WiFi connect failed to start: <error>`. Every failed attempt, whatever its reason, counts toward the 10 attempt rule, so failures that do not point at the credentials end the request after about 3 minutes.
 
 ## Test 5: Tag read by a phone
 

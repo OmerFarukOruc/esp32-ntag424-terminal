@@ -59,8 +59,9 @@ typedef struct {
  * It is a wake-up only: the result of an attempt comes from
  * hal_wifi_attempt_take(), which stays valid when the callback missed an event.
  *
- * Sequence after a drop: CONNECTED, then CONNECTING at the first failed
- * reconnect, then DISCONNECTED once after 10 consecutive failures. The HAL
+ * Sequence after a drop: CONNECTED, then CONNECTING at the disconnect event,
+ * which counts as the first failure, then DISCONNECTED once the drop and the
+ * reconnects together have failed 10 times in a row. The HAL
  * keeps retrying afterwards and reports CONNECTED when the link returns.
  *
  * @param state New Wi-Fi state
@@ -120,13 +121,14 @@ typedef enum {
  * FAILED when the attempts fail or the deadline passes. Until the first IP
  * address with these credentials, 3 failed attempts whose reason means wrong
  * credentials or no matching access point end the retries (a few tens of
- * seconds). Any other failure reason, or a connection that worked before,
- * follows the 10 attempt rule (about 3 minutes). An attempt that joins the
+ * seconds). Every failed attempt, whatever its reason, also counts toward
+ * the 10 attempt rule (about 3 minutes). An attempt that joins the
  * access point but gets no IP address within 30 s, or whose connect call
  * fails at once, counts as failed. The deadline is absolute: 180 s
  * (HAL_WIFI_ATTEMPT_DEADLINE_MS) after this function accepted the request,
  * however many retries and timers ran. After a failed attempt the HAL keeps
- * retrying in the background unless the 3 attempt rule ended the retries. An
+ * retrying in the background unless the 3 attempt rule ended the retries or
+ * a retry timer failed to start. An
  * IP address event counts only while the driver is associated with these
  * credentials' network and the interface holds that address, so an event from
  * an earlier connection never completes a later attempt. The credentials
@@ -140,9 +142,10 @@ typedef enum {
  * @param[out] attempt_id The id of the new attempt, or 0 when the call fails
  * @return ESP_OK when the attempt started, ESP_ERR_INVALID_STATE before init,
  *         ESP_ERR_INVALID_ARG for a missing argument, an empty or unterminated
- *         SSID or password, a password of 1 to 7 bytes, or a 64-byte password
- *         with a character that is not a hex digit, ESP_ERR_NOT_FINISHED while
- *         a scan or another Wi-Fi driver call of the HAL runs (the old
+ *         SSID, an unterminated password, a password of 1 to 7 bytes, or a
+ *         64-byte password with a character that is not a hex digit,
+ *         ESP_ERR_NOT_FINISHED while a scan or another Wi-Fi driver call of
+ *         the HAL runs (the old
  *         connection stays up), or the error of the failing Wi-Fi driver call
  *         (for example ESP_ERR_WIFI_PASSWORD)
  */
