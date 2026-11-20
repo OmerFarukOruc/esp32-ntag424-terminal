@@ -200,6 +200,25 @@ int main(void)
     check_rejected("a \\u escape whose 3rd digit is not hex is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"AB\\u00Z1CD\"}"));
     check_rejected("a \\u escape whose 4th digit is not hex is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"AB\\u004ZCD\"}"));
     check_rejected("a control byte after the JSON value is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"ABCD\"}\x01"));
+    check_rejected("a raw tab inside an ssid is rejected", WRITE(wifi_config_chr_access, "{\"ssid\":\"Home\tNet\"}"));
+    check_rejected("a raw line feed inside a member name is rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"no\nte\":1}"));
+    check_rejected("a raw carriage return inside a password is rejected",
+                   WRITE(wifi_config_chr_access, "{\"ssid\":\"A\",\"password\":\"1234\r5678\"}"));
+    check_rejected("a byte order mark before the object is rejected", WRITE(url_set_chr_access, "\xEF\xBB\xBF{\"deviceId\":\"SHOP\"}"));
+    check_rejected("a lone UTF-8 continuation byte in an ssid is rejected", WRITE(wifi_config_chr_access, "{\"ssid\":\"a\x80\"}"));
+    check_rejected("an overlong UTF-8 encoding is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":\"\xC0\xAF\"}"));
+    check_rejected("a UTF-16 surrogate encoded as UTF-8 is rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":\"\xED\xA0\x80\"}"));
+    check_rejected("a code point above U+10FFFF is rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":\"\xF4\x90\x80\x80\"}"));
+    check_rejected("a UTF-8 sequence cut short by the closing quote is rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":\"\xE2\x82\"}"));
+    check_rejected("a number with a leading zero is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":01}"));
+    check_rejected("a number that ends in a decimal point is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":1.}"));
+    check_rejected("a minus sign before a decimal point is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":-.5}"));
+    check_rejected("a decimal point with no digit before the exponent is rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":[-1.e5]}"));
     check_rejected("two deviceId members with different values are rejected",
                    WRITE(url_set_chr_access, "{\"deviceId\":\"FIRST\",\"deviceId\":\"SECOND\"}"));
     check_rejected("two deviceId members with the same value are rejected",
@@ -236,6 +255,25 @@ int main(void)
     att = WRITE(url_set_chr_access, " {\"deviceId\":\"S\\u0041OP_01\"}\t\r\n");
     snprintf(d, sizeof d, "ATT=0x%02x events=%d id=%s", att, cb_count, cb_count ? cb_data : "-");
     check("a valid \\u escape and JSON whitespace are accepted", att == 0 && cb_count == 1 && strcmp(cb_data, "SAOP_01") == 0, d);
+    att = WRITE(wifi_config_chr_access, "{\"ssid\":\"Home\\tNet\\\"\",\t\"password\":\"12345678\"}\n");
+    ssid = ((hal_ble_wifi_config_t *)cb_data)->ssid;
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d ssid=%s", att, cb_count, cb_count ? ssid : "-");
+    check("an escaped tab and quote inside an ssid, and raw whitespace between members, are accepted",
+          att == 0 && cb_count == 1 && strcmp(ssid, "Home\tNet\"") == 0, d);
+
+    att = WRITE(wifi_config_chr_access, "{\"ssid\":\"A\\u0041\",\t\"password\":\"p\\\\\"\n}");
+    ssid = ((hal_ble_wifi_config_t *)cb_data)->ssid;
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d ssid=%s", att, cb_count, cb_count ? ssid : "-");
+    check("a password that ends in an escaped backslash closes its string, so whitespace after it is accepted",
+          att == 0 && cb_count == 1 && strcmp(ssid, "AA") == 0, d);
+    att = WRITE(wifi_config_chr_access, "{\"ssid\":\"Gr\xC3\xBC\xC3\x9F \xE2\x98\x95 \xF0\x9F\x99\x82\",\"password\":\"12345678\"}");
+    ssid = ((hal_ble_wifi_config_t *)cb_data)->ssid;
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d ssid=%s", att, cb_count, cb_count ? ssid : "-");
+    check("an ssid with 2, 3 and 4 byte UTF-8 characters is accepted",
+          att == 0 && cb_count == 1 && strcmp(ssid, "Gr\xC3\xBC\xC3\x9F \xE2\x98\x95 \xF0\x9F\x99\x82") == 0, d);
+    att = WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"n\":[0,-0.5e+3,10E2,7e-1,-12]}");
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d id=%s", att, cb_count, cb_count ? cb_data : "-");
+    check("numbers that follow the JSON grammar are accepted", att == 0 && cb_count == 1 && strcmp(cb_data, "SHOP") == 0, d);
 
     secret_frees = 0;
     att = WRITE(wifi_config_chr_access, "{\"ssid\":\"A\",\"password\":\"" SECRET "\"} x");

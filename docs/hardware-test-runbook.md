@@ -202,6 +202,9 @@ Expect `hal_ble: BLE connected, conn_handle=<n>` and `MTU update: conn_handle=<n
 | NUL character | `{"deviceId":"SHOP\u0000X"}` to URL_SET fails with ATT error `0x13`, log `Write holds a NUL character` | [ ] |
 | Bad escape | `{"deviceId":"AB\uZZZZCD"}` to URL_SET fails with ATT error `0x13`, log `Write holds a \u escape without 4 hex digits` | [ ] |
 | Control byte | `{"deviceId":"SHOP"}` followed by the byte `0x01` to URL_SET fails with ATT error `0x13`, log `Write holds a control character` | [ ] |
+| Raw tab in a string | `{"ssid":"Home<tab>Net","password":"x"}` with a raw tab byte to WIFI_CONFIG fails with ATT error `0x13`, log `Write holds a control character`; the same write with the SSID as `Home\tNet` is accepted and gets the failure notification at once, because the password is 1 byte, so the device stays in onboarding | [ ] |
+| Invalid UTF-8 | `{"deviceId":"SHOP","n":"<0x80>"}` with a raw `0x80` byte to URL_SET fails with ATT error `0x13`, log `Write holds invalid UTF-8` | [ ] |
+| Malformed number | `{"deviceId":"SHOP","n":01}` to URL_SET fails with ATT error `0x13`, log `Write holds a malformed number` | [ ] |
 | Missing field | `{"x":1}` to URL_SET fails with ATT error `0x13` and `URL_SET needs a string deviceId` | [ ] |
 | No notifications | With notifications off on a characteristic, the write fails with ATT error `0xFD`, and the log shows `Write refused: notifications are off on this characteristic` | [ ] |
 | Small MTU | With the default 23-byte MTU, a write fails with ATT error `0xFC`, and the log shows `Write refused: ATT MTU 23 is below 100` | [ ] |

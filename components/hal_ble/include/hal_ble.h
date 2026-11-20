@@ -55,8 +55,12 @@
  * an empty deviceId or one over 31 bytes. A WIFI_CONFIG or URL_SET write that
  * is not one JSON object with only whitespace after it, repeats a top-level
  * member name (compared after unescaping and case-sensitively, so
- * "device\u0049d" repeats "deviceId"), or holds a NUL character (raw or as the
- * escape \u0000) fails with ATT error 0x13 (Value Not Allowed). So does a
+ * "device\u0049d" repeats "deviceId"), holds a NUL character (raw or as the
+ * escape \u0000), a raw control byte below 0x20 inside a string, a control
+ * byte other than tab, line feed and carriage return between tokens, or a \u
+ * escape without 4 hex digits, is not valid UTF-8, starts with a byte order
+ * mark, or holds a number outside the RFC 8259 grammar (such as 01 or 1.)
+ * fails with ATT error 0x13 (Value Not Allowed). So does a
  * WIFI_CONFIG without a string "ssid" or with a "password" that is not a
  * string, and a URL_SET without a string "deviceId". Other members whose
  * top-level names are unique are ignored, nested objects included. A
