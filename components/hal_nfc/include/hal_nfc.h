@@ -75,18 +75,22 @@ esp_err_t hal_nfc_init(void);
  * {CONFIG_HAL_NFC_SDM_BASE_URL}/{device_id}?picc_data={32hex}&cmac={16hex}
  *
  * The call blocks the calling task until the tag is configured, the attempts
- * run out, or timeout_ms passes.
+ * run out, or timeout_ms passes. timeout_ms counts from the call and covers the
+ * wait for the reader, PN532 recovery and every tag command. No tag command
+ * starts after it passes; releasing the tag may take up to 200 ms more.
  *
  * @param[in] device_id Device identifier for the URL path: 1 to
  *            HAL_NFC_DEVICE_ID_MAX_LEN characters from [A-Za-z0-9_-]
- * @param[in] timeout_ms Overall timeout in milliseconds, 0 for no overall limit
+ * @param[in] timeout_ms Overall timeout in milliseconds, greater than 0
  * @return HAL_NFC_OK on success, or
  *         HAL_NFC_ERR_NOT_INIT before hal_nfc_init(),
- *         HAL_NFC_ERR_INVALID_PARAM for a bad device_id,
- *         HAL_NFC_ERR_TIMEOUT when another call holds the reader for over a second,
+ *         HAL_NFC_ERR_INVALID_PARAM for a bad device_id or a timeout_ms of 0,
+ *         HAL_NFC_ERR_TIMEOUT when another call holds the reader for over a second
+ *         or for longer than timeout_ms,
  *         HAL_NFC_ERR_PN532_UNRESPONSIVE when the PN532 does not answer after recovery,
  *         HAL_NFC_ERR_NO_TAG when no tag appears and the attempts run out,
- *         HAL_NFC_ERR_SDM_TIMEOUT when timeout_ms passes first,
+ *         HAL_NFC_ERR_SDM_TIMEOUT when timeout_ms passes first; when it passes
+ *         after WriteData, the tag holds the new URL with SDM still off,
  *         HAL_NFC_ERR_TAG_NOT_DESFIRE for a tag without ISO 14443-4,
  *         HAL_NFC_ERR_NOT_SUPPORTED for a tag without the NDEF application,
  *         HAL_NFC_ERR_AUTH when key 0 is not the factory key,

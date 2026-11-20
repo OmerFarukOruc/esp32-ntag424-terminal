@@ -227,7 +227,7 @@ Write the device id:
 {"deviceId":"SHOP_01"}
 ```
 
-The id is 1 to 31 characters from `A-Z a-z 0-9 _ -`. The device checks the id first, and a bad character returns code 1006 in the result notification, not an ATT error. It then waits up to 15 s for a tag on the PN532. Each of up to 4 retries waits up to 5 s, and the write gives up after 30 s in total. A wrong key 0, a tag that is not an NTAG424 DNA, and a tag without the NDEF application end the write after the first attempt. Put the tag on the antenna before or right after the write. When the write succeeds, the device stores the id in NVS, and DEVICE_INFO reports it from then on.
+The id is 1 to 31 characters from `A-Z a-z 0-9 _ -`. The device checks the id first, and a bad character returns code 1006 in the result notification, not an ATT error. It then waits up to 15 s for a tag on the PN532. Each of up to 4 retries waits up to 5 s, and the write gives up 30 s after it starts, counting PN532 recovery. No tag command starts after that, so a write that runs out of time after writing the URL leaves the URL on the tag with SDM off. A wrong key 0, a tag that is not an NTAG424 DNA, and a tag without the NDEF application end the write after the first attempt. Put the tag on the antenna before or right after the write. When the write succeeds, the device stores the id in NVS, and DEVICE_INFO reports it from then on.
 
 The result arrives as one notification:
 

@@ -39,9 +39,23 @@
 typedef struct {
     pn532_t *pn532;             /**< Reader handle, NULL after a failed re-init */
     SemaphoreHandle_t mutex;    /**< Serializes every PN532 conversation; NULL before init */
+    int64_t deadline_us;        /**< esp_timer time the running entry point must finish by */
 } nfc_ctx_t;
 
 extern nfc_ctx_t g_nfc;
+
+/* hal_nfc.c: the deadline of the running entry point. Callers hold g_nfc.mutex. */
+
+bool nfc_deadline_passed(void);
+
+/** Milliseconds left before the deadline, 0 once it passed */
+int64_t nfc_deadline_left_ms(void);
+
+/** vTaskDelay() that ends at the deadline */
+void nfc_delay_ms(uint32_t ms);
+
+/** Let PN532 reads run a short time past the deadline, to release the tag */
+void nfc_deadline_allow_cleanup(void);
 
 /* nfc_reader.c: PN532 link recovery and tag detection. Callers hold g_nfc.mutex. */
 
@@ -99,7 +113,7 @@ void nfc_ev2_session_reset(void);
 
 /* ntag424_sdm.c */
 
-/** Run the SDM configuration; the caller holds g_nfc.mutex */
-hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id, uint32_t timeout_ms);
+/** Run the SDM configuration by g_nfc.deadline_us; the caller holds g_nfc.mutex */
+hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id);
 
 #endif /* HAL_NFC_PRIV_H */

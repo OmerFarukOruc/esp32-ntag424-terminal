@@ -16,7 +16,6 @@
 #include <string.h>
 #include "hal_nfc_priv.h"
 #include "esp_timer.h"
-#include "freertos/task.h"
 
 static const char *TAG = "hal_nfc";
 
@@ -167,6 +166,14 @@ static bool retry_is_futile(hal_nfc_err_t err)
     return err == HAL_NFC_ERR_AUTH || err == HAL_NFC_ERR_TAG_NOT_DESFIRE || err == HAL_NFC_ERR_NOT_SUPPORTED;
 }
 
+/** Starts no tag command once the deadline has passed */
+static hal_nfc_err_t check_deadline(const char *next_step)
+{
+    ESP_RETURN_ON_FALSE(!nfc_deadline_passed(), HAL_NFC_ERR_SDM_TIMEOUT, TAG,
+                        "SDM config: timeout reached before %s", next_step);
+    return HAL_NFC_OK;
+}
+
 /** One pass over a tag; the tag is released on every exit after detection */
 static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_ms, int attempt_no)
 {
@@ -197,6 +204,10 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
      * time and a late command makes the PN532 report a protocol error (status
      * 0x0B). A retry resyncs the PN532 first. */
     for (int r = 0; r < SDM_SELECT_RETRIES; r++) {
+        err = check_deadline("SELECT");
+        if (err != HAL_NFC_OK) {
+            break;
+        }
         if (r > 0 && !nfc_reader_recover(NULL)) {
             err = HAL_NFC_ERR_PN532_UNRESPONSIVE;
             break;
@@ -212,12 +223,20 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
     }
     t_select = esp_timer_get_time();
 
+    err = check_deadline("authentication");
+    if (err != HAL_NFC_OK) {
+        goto release;
+    }
     err = nfc_ev2_authenticate(0, FACTORY_KEY);
     if (err != HAL_NFC_OK) {
         ESP_LOGW(TAG, "SDM config: authentication failed (%d)", err);
         goto release;
     }
 
+    err = check_deadline("WriteData");
+    if (err != HAL_NFC_OK) {
+        goto release;
+    }
     err = nfc_ev2_write_file(SDM_NDEF_FILE_NO, ndef->msg, ndef->len);
     if (err != HAL_NFC_OK) {
         ESP_LOGW(TAG, "SDM config: WriteData failed (%d)", err);
@@ -226,6 +245,10 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
     t_write = esp_timer_get_time();
     ESP_LOGI(TAG, "SDM config: NDEF URL written via DESFire WriteData (%zu bytes)", ndef->len);
 
+    err = check_deadline("ChangeFileSettings, the NDEF URL is written but SDM is off");
+    if (err != HAL_NFC_OK) {
+        goto release;
+    }
     err = change_file_settings_sdm(ndef);
     if (err != HAL_NFC_OK) {
         ESP_LOGW(TAG, "SDM config: ChangeFileSettings failed (%d)", err);
@@ -239,17 +262,9 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
              (long long)ms_between(t_start, t_end));
 
 release:
+    nfc_deadline_allow_cleanup();
     nfc_reader_release_tag();
     return err;
-}
-
-/** Milliseconds left of the overall timeout; INT64_MAX when timeout_ms is 0 */
-static int64_t remaining_ms(int64_t start_us, uint32_t timeout_ms)
-{
-    if (timeout_ms == 0) {
-        return INT64_MAX;
-    }
-    return ((int64_t)timeout_ms * 1000 - (esp_timer_get_time() - start_us)) / 1000;
 }
 
 /** Recovery attempts with doubling backoff before the first detect */
@@ -257,42 +272,43 @@ static bool preflight(void)
 {
     uint32_t backoff_ms = SDM_PREFLIGHT_BACKOFF_MS;
 
-    for (int attempt = 1; attempt <= SDM_PREFLIGHT_ATTEMPTS; attempt++) {
+    for (int attempt = 1; attempt <= SDM_PREFLIGHT_ATTEMPTS && !nfc_deadline_passed(); attempt++) {
         if (nfc_reader_recover(NULL)) {
             return true;
         }
         ESP_LOGW(TAG, "SDM config: preflight recovery attempt %d/%d failed", attempt, SDM_PREFLIGHT_ATTEMPTS);
         if (attempt < SDM_PREFLIGHT_ATTEMPTS) {
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+            nfc_delay_ms(backoff_ms);
             backoff_ms *= 2;
         }
     }
     return false;
 }
 
-hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id, uint32_t timeout_ms)
+hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id)
 {
     sdm_ndef_t ndef;
     build_sdm_ndef(device_id, &ndef);
-    ESP_RETURN_ON_FALSE(preflight(), HAL_NFC_ERR_PN532_UNRESPONSIVE, TAG,
-                        "SDM config: PN532 unavailable after recovery");
+    if (!preflight()) {
+        ESP_LOGE(TAG, "SDM config: PN532 unavailable after recovery");
+        return nfc_deadline_passed() ? HAL_NFC_ERR_SDM_TIMEOUT : HAL_NFC_ERR_PN532_UNRESPONSIVE;
+    }
 
-    const int64_t start_us = esp_timer_get_time();
     hal_nfc_err_t err = HAL_NFC_ERR_NO_TAG;
 
     for (int attempt = 1; attempt <= SDM_MAX_ATTEMPTS; attempt++) {
-        if (attempt > 1) {
+        if (attempt > 1 && !nfc_deadline_passed()) {
             ESP_LOGW(TAG, "SDM config: Retry %d/%d - recovering PN532", attempt, SDM_MAX_ATTEMPTS);
             if (!nfc_reader_recover(NULL)) {
                 ESP_LOGE(TAG, "SDM config: PN532 recovery failed");
                 err = HAL_NFC_ERR_PN532_UNRESPONSIVE;
                 continue;
             }
-            vTaskDelay(pdMS_TO_TICKS(100));
+            nfc_delay_ms(100);
         }
 
         /* Recovery can take seconds, so size the detect window afterwards */
-        int64_t left_ms = remaining_ms(start_us, timeout_ms);
+        int64_t left_ms = nfc_deadline_left_ms();
         if (left_ms <= 0) {
             ESP_LOGE(TAG, "SDM config: Overall timeout reached before attempt %d", attempt);
             err = HAL_NFC_ERR_SDM_TIMEOUT;
@@ -316,7 +332,7 @@ hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id, uint32_t timeout_m
         return HAL_NFC_OK;
     }
 
-    if (err == HAL_NFC_ERR_TIMEOUT || (!retry_is_futile(err) && remaining_ms(start_us, timeout_ms) <= 0)) {
+    if (err == HAL_NFC_ERR_TIMEOUT || (!retry_is_futile(err) && nfc_deadline_passed())) {
         err = HAL_NFC_ERR_SDM_TIMEOUT;
     }
     ESP_LOGE(TAG, "SDM config: Failed, last_err=%d", err);

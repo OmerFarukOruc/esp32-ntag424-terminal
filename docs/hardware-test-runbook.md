@@ -275,6 +275,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | Id `bad id!` | Notification code 1006 `invalid_device_id` at once, log `URL_SET rejected: invalid device id (<n> bytes)`, no tag needed | [ ] |
 | Empty id, or an id over 31 bytes | ATT error `0x0D` on the write, log `URL_SET deviceId has <n> bytes` | [ ] |
 | No tag on the antenna | After about 30 s, code 1005 `sdm_timeout`, with `Tag detection timed out after <n> attempts` and `SDM config: Overall timeout reached before attempt <n>`. The 15 s first window and 5 s retry windows add up to more than 30 s, so the time limit ends the run before 5 attempts finish and code 1001 is unlikely. | [ ] |
+| PN532 RX wire touching a noisy line | Code 1005 `sdm_timeout` or 1003 `pn532_unresponsive` no later than about 30 s after the request. The device stays responsive and the next request works once the wire is fixed. | [ ] |
 | A tag that is not an NTAG424 DNA | Code 1002 `unsupported_tag` after one attempt (for example an NTAG215) | [ ] |
 | A DESFire tag without the NDEF application | Code 1007 `unsupported_tag_capability` after one attempt | [ ] |
 | PN532 TX wire unplugged after boot | Code 1003 `pn532_unresponsive` after several seconds, with `SDM config: PN532 unavailable after recovery` | [ ] |
