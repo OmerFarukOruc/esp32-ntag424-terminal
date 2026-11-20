@@ -9,7 +9,9 @@
  * @brief Button with debounce and hold detection
  *
  * The pin, polarity, pull-up and debounce time come from menuconfig
- * (HAL button). A hold event fires once per second of hold, from 1 s up to 10 s.
+ * (HAL button). A hold event fires once per second of hold, from 1 s up to 10 s,
+ * in order and once for each second, also when a timer tick comes late or the
+ * button is released between two ticks.
  */
 
 #ifndef HAL_BUTTON_H

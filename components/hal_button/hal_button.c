@@ -25,7 +25,7 @@ static const char *TAG = "hal_button";
 #define HOLD_CHECK_INTERVAL_US  (100 * 1000)
 #define HOLD_STEP_MS            1000
 #define HOLD_MAX_STEPS          10
-#define EVENT_QUEUE_LEN         10
+#define EVENT_QUEUE_LEN         (1 + HOLD_MAX_STEPS + 1)
 #define EVENT_TASK_STACK        4096
 #define EVENT_TASK_PRIORITY     5
 
@@ -77,6 +77,19 @@ static void queue_event(hal_button_event_t event, uint32_t hold_ms)
     }
 }
 
+/** Queues a HOLD event for every whole second up to held_ms that has none yet, in order */
+static void queue_hold_steps(uint32_t held_ms)
+{
+    int step = held_ms / HOLD_STEP_MS;
+    if (step > HOLD_MAX_STEPS) {
+        step = HOLD_MAX_STEPS;
+    }
+    while (s_button.last_hold_step < step) {
+        s_button.last_hold_step++;
+        queue_event(HAL_BUTTON_EVENT_HOLD, s_button.last_hold_step * HOLD_STEP_MS);
+    }
+}
+
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
     gpio_intr_disable(BUTTON_GPIO);
@@ -98,6 +111,7 @@ static void debounce_timer_callback(void *arg)
         uint32_t held_ms = hold_duration_ms();
         s_button.pressed = false;
         esp_timer_stop(s_button.hold_timer);
+        queue_hold_steps(held_ms);
         queue_event(HAL_BUTTON_EVENT_RELEASE, held_ms);
     }
 
@@ -111,18 +125,9 @@ static void debounce_timer_callback(void *arg)
 
 static void hold_timer_callback(void *arg)
 {
-    int step = hold_duration_ms() / HOLD_STEP_MS;
-    if (step > HOLD_MAX_STEPS) {
-        step = HOLD_MAX_STEPS;
-    }
-
-    /* A late tick can cross two steps at once, and then only the latest is reported. */
-    if (step > s_button.last_hold_step) {
-        s_button.last_hold_step = step;
-        queue_event(HAL_BUTTON_EVENT_HOLD, step * HOLD_STEP_MS);
-        if (step == HOLD_MAX_STEPS) {
-            esp_timer_stop(s_button.hold_timer);
-        }
+    queue_hold_steps(hold_duration_ms());
+    if (s_button.last_hold_step == HOLD_MAX_STEPS) {
+        esp_timer_stop(s_button.hold_timer);
     }
 }
 
