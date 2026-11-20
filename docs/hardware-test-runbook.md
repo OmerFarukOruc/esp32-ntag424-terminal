@@ -74,12 +74,12 @@ The last four lines can appear in another order, because the state task runs as 
 |-------|----------|--------|
 | No error lines during init | No `E` lines from `app_state`, `hal_nfc`, `hal_ble`, or `main` | [ ] |
 | NimBLE event pool | `BLE HAL initialized` appears and no assert or reboot follows. `hal_ble_init` takes 7 NimBLE events and 1 callout from the port's pool, which aborts at boot when it runs out. | [ ] |
-| Init order | The indicator comes first, then diagnostics, NFC, network, button, and BLE | [ ] |
+| Init order | The indicator comes first, so it can show any later failure, then diagnostics, NFC, network, button, and BLE | [ ] |
 | LED | White pulse, 2 s cycle (idle, WiFi disconnected) | [ ] |
 | No boot beep | The buzzer stays silent | [ ] |
 | State | `State: INIT -> IDLE` | [ ] |
 
-When a peripheral init step fails, `app_state` logs `<step> init failed: <error>`, where the step is `NFC`, `Network`, `Button`, `BLE`, `Device id`, or `Power`. The other steps still run. Then `main` logs `Failed to initialize application: <error>`, the state goes `INIT -> ERROR`, and the device logs `Device in error state`. The LED blinks red and the buzzer plays two long beeps. A short press returns the device to IDLE.
+When a peripheral init step fails, `app_state` logs `<step> init failed: <error>`, where the step is `NFC`, `Network`, `Button`, `BLE`, `Device id`, or `Power`. The other steps still run, so the button starts even when another step fails: a short press leaves the error state, and a 10 s hold runs the factory reset. Then `main` logs `Failed to initialize application: <error>`, the state goes `INIT -> ERROR`, and the device logs `Device in error state`. The LED blinks red and the buzzer plays two long beeps. A short press returns the device to IDLE.
 
 When a core step fails, init stops. The log names the step (`Indicator init failed`, `NVS init failed`, `Diagnostics init failed`, `Event queue create failed`, or `State task create failed`) and `main` logs `Failed to initialize application: <error>`. The state stays INIT, and the LED blinks red when the indicator started.
 
@@ -88,7 +88,7 @@ When a core step fails, init stops. The log names the step (`Indicator init fail
 | `hal_nfc: Failed to initialize PN532` | PN532 wiring, mode switches, or power. Boot once with the PN532 unplugged to check the error state. |
 | `hal_power: ADC calibration failed` | `HAL_POWER_BATTERY_MONITOR` is on and the chip has no ADC calibration data |
 | `app_state: Abnormal reset detected (reason=N)` | The previous run crashed, see test 12 |
-| `app_state: NVS needs an erase (...), stored settings are lost` | NVS held data from another version, the device erased it |
+| `app_state: NVS needs an erase (...), stored settings are lost` | NVS held data from another version, and the device erased it. It erases instead of stopping, because without NVS it cannot reach the button that factory-resets it, and onboarding restores the WiFi credentials, BLE bonds and device id. |
 
 ## Test 2: WiFi connection
 
@@ -435,6 +435,8 @@ Run these in one session without a reboot.
 | No watchdog | No `Task watchdog got triggered` message | [ ] |
 | Queue | No `Event queue full, dropping` line | [ ] |
 | No error state | No `Event queue overflowed 3 times in a row, entering ERROR state` line, and no `Device in error state` line | [ ] |
+
+When the event queue refuses 3 events in a row while a tag write runs, the device enters ERROR only after the write ends, because a tag write ends only through `URL_SET_DONE`, which also sends the URL_SET result.
 | Soak | After 5 minutes idle and 5 minutes in onboarding the state is unchanged and the log shows no error | [ ] |
 
 ## Test 9: Battery monitor
