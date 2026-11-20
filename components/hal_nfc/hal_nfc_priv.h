@@ -101,6 +101,9 @@ hal_nfc_err_t nfc_select_ndef_app(void);
 /** AuthenticateEV2First with an AES-128 key; fills the session on success */
 hal_nfc_err_t nfc_ev2_authenticate(uint8_t key_no, const uint8_t key[16]);
 
+/** GetFileSettings before authentication; *len is the buffer size in and the answer length out */
+hal_nfc_err_t nfc_ev2_get_file_settings(uint8_t file_no, uint8_t *settings, size_t *len);
+
 /** WriteData (plain comm mode) of len <= NFC_MAX_NDEF_LEN bytes at offset 0 */
 hal_nfc_err_t nfc_ev2_write_file(uint8_t file_no, const uint8_t *data, size_t len);
 

@@ -166,6 +166,37 @@ static bool retry_is_futile(hal_nfc_err_t err)
     return err == HAL_NFC_ERR_AUTH || err == HAL_NFC_ERR_TAG_NOT_DESFIRE || err == HAL_NFC_ERR_NOT_SUPPORTED;
 }
 
+/* GetFileSettings answer: FileType, FileOption, AccessRights (RW|Change, Read|Write), FileSize LE,
+ * then SDM fields when SDM is on (NT4H2421Gx datasheet, GetFileSettings) */
+#define FILE_SETTINGS_MIN_LEN   7
+#define FILE_SETTINGS_MAX_LEN   32
+#define FILE_TYPE_STANDARD      0x00
+#define ACCESS_KEY_0            0x0
+#define ACCESS_FREE             0xE
+
+/**
+ * Refuses a tag whose NDEF file the factory key cannot turn into an SDM file,
+ * so WriteData never changes a tag that ChangeFileSettings would then reject.
+ */
+static hal_nfc_err_t check_ndef_file(const sdm_ndef_t *ndef)
+{
+    uint8_t fs[FILE_SETTINGS_MAX_LEN];
+    size_t len = sizeof(fs);
+    hal_nfc_err_t err = nfc_ev2_get_file_settings(SDM_NDEF_FILE_NO, fs, &len);
+    ESP_RETURN_ON_FALSE(err == HAL_NFC_OK, err, TAG, "SDM config: GetFileSettings failed (%d)", err);
+    ESP_RETURN_ON_FALSE(len >= FILE_SETTINGS_MIN_LEN, HAL_NFC_ERR_COMM, TAG,
+                        "SDM config: GetFileSettings answer of %u bytes is too short", (unsigned)len);
+
+    uint8_t change_key = fs[2] & 0x0F;
+    uint32_t size = fs[4] | (fs[5] << 8) | ((uint32_t)fs[6] << 16);
+    ESP_RETURN_ON_FALSE(fs[0] == FILE_TYPE_STANDARD && size >= ndef->len &&
+                        (change_key == ACCESS_KEY_0 || change_key == ACCESS_FREE),
+                        HAL_NFC_ERR_NOT_SUPPORTED, TAG,
+                        "SDM config: file 02 has type %u, %u bytes and change key %u; it needs a standard file of "
+                        "%u bytes that key 0 may change", fs[0], (unsigned)size, change_key, (unsigned)ndef->len);
+    return HAL_NFC_OK;
+}
+
 /** Starts no tag command once the deadline has passed */
 static hal_nfc_err_t check_deadline(const char *next_step)
 {
@@ -228,6 +259,15 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
         goto release;
     }
     t_select = esp_timer_get_time();
+
+    err = check_deadline("GetFileSettings");
+    if (err != HAL_NFC_OK) {
+        goto release;
+    }
+    err = check_ndef_file(ndef);
+    if (err != HAL_NFC_OK) {
+        goto release;
+    }
 
     err = check_deadline("authentication");
     if (err != HAL_NFC_OK) {

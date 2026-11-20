@@ -22,6 +22,7 @@ static const char *TAG = "hal_nfc";
 #define DESFIRE_INS_AUTH_EV2_FIRST          0x71
 #define DESFIRE_INS_ADDITIONAL_FRAME        0xAF
 #define DESFIRE_INS_CHANGE_FILE_SETTINGS    0x5F
+#define DESFIRE_INS_GET_FILE_SETTINGS       0xF5
 #define DESFIRE_INS_WRITE_DATA              0x8D
 
 /* DESFire status byte (SW2 after SW1 = 0x91) */
@@ -254,6 +255,11 @@ out:
         nfc_ev2_session_reset();
     }
     return ret;
+}
+
+hal_nfc_err_t nfc_ev2_get_file_settings(uint8_t file_no, uint8_t *settings, size_t *len)
+{
+    return desfire_send_cmd(DESFIRE_INS_GET_FILE_SETTINGS, &file_no, 1, DESFIRE_STATUS_OK, settings, len);
 }
 
 hal_nfc_err_t nfc_ev2_write_file(uint8_t file_no, const uint8_t *data, size_t len)

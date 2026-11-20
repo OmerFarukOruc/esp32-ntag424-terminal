@@ -244,7 +244,7 @@ The result arrives as one notification:
 | 1004 | `tag_auth_failed` | The tag rejected key 0 |
 | 1005 | `sdm_timeout` | The 30 s limit passed, or a PN532 exchange timed out on the last attempt. A tag that is missing the whole time usually ends here, because the first 15 s window and the 5 s retry windows add up to more than 30 s. |
 | 1006 | `invalid_device_id` | The id has a bad length or character |
-| 1007 | `unsupported_tag_capability` | The tag lacks a required capability, for example the NDEF application |
+| 1007 | `unsupported_tag_capability` | The tag lacks a required capability, for example the NDEF application, or its file 02 is not a standard data file that key 0 may reconfigure and that holds the URL. The device checks this before it writes anything. |
 | 1099 | `sdm_config_failed` | Any other failure, such as a framing error or an unexpected status from the tag |
 
 Code 1099 also comes with `nfc_config_busy` (a tag write is already running), `not_onboarding` (the device left onboarding while the client stayed connected) and `nfc_config_task_create_failed` (out of memory). A WIFI_CONFIG sent during a tag write or outside onboarding gets a WIFI_CONFIG failure notification. The device sends no result when the client disconnects before the write ends, or when the client turned notifications off on URL_SET during the write. A result goes only to the connection that sent the request, never to a client that connected later.

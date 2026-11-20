@@ -278,6 +278,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | PN532 RX wire touching a noisy line | Code 1005 `sdm_timeout` or 1003 `pn532_unresponsive` no later than about 30 s after the request. The device stays responsive and the next request works once the wire is fixed. | [ ] |
 | A tag that is not an NTAG424 DNA | Code 1002 `unsupported_tag` after one attempt (for example an NTAG215) | [ ] |
 | A DESFire tag without the NDEF application | Code 1007 `unsupported_tag_capability` after one attempt | [ ] |
+| An NTAG424 DNA whose file 02 change right is not key 0 | Code 1007 `unsupported_tag_capability` after one attempt, log `SDM config: file 02 has type 0, <n> bytes and change key <k>`, and the tag content is unchanged | [ ] |
 | PN532 TX wire unplugged after boot | Code 1003 `pn532_unresponsive` after several seconds, with `SDM config: PN532 unavailable after recovery` | [ ] |
 | Wire plugged in again, same request | Success without a reboot, because the firmware re-initializes the PN532. Not confirmed on hardware. | [ ] |
 | Second URL_SET while one runs | At once, code 1099 `nfc_config_busy`, log `URL_SET rejected: nfc_config_busy` | [ ] |

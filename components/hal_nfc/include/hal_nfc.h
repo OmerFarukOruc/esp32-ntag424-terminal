@@ -92,7 +92,9 @@ esp_err_t hal_nfc_init(void);
  *         HAL_NFC_ERR_SDM_TIMEOUT when timeout_ms passes first; when it passes
  *         after WriteData, the tag holds the new URL with SDM still off,
  *         HAL_NFC_ERR_TAG_NOT_DESFIRE for a tag without ISO 14443-4,
- *         HAL_NFC_ERR_NOT_SUPPORTED for a tag without the NDEF application,
+ *         HAL_NFC_ERR_NOT_SUPPORTED for a tag without the NDEF application, or
+ *         whose file 02 key 0 may not reconfigure or that is too small; the tag is
+ *         left unchanged,
  *         HAL_NFC_ERR_AUTH when key 0 is not the factory key,
  *         HAL_NFC_ERR_COMM for any other failure after the attempts run out
  *
