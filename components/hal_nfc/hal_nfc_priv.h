@@ -87,7 +87,8 @@ hal_nfc_err_t nfc_ev2_authenticate(uint8_t key_no, const uint8_t key[16]);
 /** WriteData (plain comm mode) of len <= NFC_MAX_NDEF_LEN bytes at offset 0 */
 hal_nfc_err_t nfc_ev2_write_file(uint8_t file_no, const uint8_t *data, size_t len);
 
-/** ChangeFileSettings in CommMode.Full; len is at most 31 bytes */
+/** ChangeFileSettings in CommMode.Full; len is at most 31 bytes. OK only when the tag's response MAC
+ * matches; any failure forgets the session keys. */
 hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *settings, size_t len);
 
 /** Forget the session keys */

@@ -201,7 +201,7 @@ hal_nfc_err_t nfc_ev2_authenticate(uint8_t key_no, const uint8_t key[16])
     hal_nfc_err_t ret = HAL_NFC_OK;
     hal_nfc_err_t err;
 
-    s_session.authenticated = false;
+    nfc_ev2_session_reset();
 
     /* Part 1: KeyNo, LenCap = 0; the tag answers with the encrypted RndB */
     const uint8_t part1[2] = { key_no, 0x00 };
@@ -288,10 +288,34 @@ static void cmac_truncate(const uint8_t full_mac[AES_BLOCK_LEN], uint8_t short_m
     }
 }
 
-/**
- * The response MAC is not verified: the tag state is read from the status
- * bytes alone and the command counter advances on status OK.
- */
+static bool mac_equal(const uint8_t a[CMD_MAC_LEN], const uint8_t b[CMD_MAC_LEN])
+{
+    uint8_t diff = 0;
+    for (int i = 0; i < CMD_MAC_LEN; i++) {
+        diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+}
+
+/** Checks the MAC the tag sends after a CommMode.Full command without response data */
+static hal_nfc_err_t verify_response_mac(const uint8_t response[CMD_MAC_LEN])
+{
+    /* MAC input: RC 00 || CmdCtr + 1 LE || TI */
+    uint16_t ctr = s_session.cmd_ctr + 1;
+    const uint8_t mac_input[7] = {
+        DESFIRE_STATUS_OK, ctr & 0xFF, (ctr >> 8) & 0xFF,
+        s_session.ti[0], s_session.ti[1], s_session.ti[2], s_session.ti[3],
+    };
+    uint8_t full_mac[AES_BLOCK_LEN];
+    uint8_t expected[CMD_MAC_LEN];
+    ESP_RETURN_ON_FALSE(nfc_aes_cmac(s_session.ses_auth_mac_key, mac_input, sizeof(mac_input), full_mac) == ESP_OK,
+                        HAL_NFC_ERR_COMM, TAG, "Response MAC failed");
+    cmac_truncate(full_mac, expected);
+    ESP_RETURN_ON_FALSE(mac_equal(expected, response), HAL_NFC_ERR_COMM, TAG, "Tag response MAC does not match");
+    return HAL_NFC_OK;
+}
+
+/** The tag must answer with a valid response MAC; any failure ends the session. */
 hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *settings, size_t len)
 {
     ESP_RETURN_ON_FALSE(s_session.authenticated, HAL_NFC_ERR_AUTH, TAG, "No authenticated session");
@@ -338,10 +362,21 @@ hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *setti
                         HAL_NFC_ERR_COMM, TAG, "Command MAC failed");
     cmac_truncate(full_mac, &cmd_data[1 + padded_len]);
 
+    uint8_t response[CMD_MAC_LEN];
+    size_t resp_len = sizeof(response);
     hal_nfc_err_t err = desfire_send_cmd(DESFIRE_INS_CHANGE_FILE_SETTINGS, cmd_data,
-                                         1 + padded_len + CMD_MAC_LEN, DESFIRE_STATUS_OK, NULL, NULL);
-    if (err == HAL_NFC_OK) {
-        s_session.cmd_ctr++;
+                                         1 + padded_len + CMD_MAC_LEN, DESFIRE_STATUS_OK, response, &resp_len);
+    if (err == HAL_NFC_OK && resp_len != CMD_MAC_LEN) {
+        ESP_LOGE(TAG, "ChangeFileSettings: expected an 8 byte response MAC, got %u bytes", (unsigned)resp_len);
+        err = HAL_NFC_ERR_COMM;
     }
-    return err;
+    if (err == HAL_NFC_OK) {
+        err = verify_response_mac(response);
+    }
+    if (err != HAL_NFC_OK) {
+        nfc_ev2_session_reset();
+        return err;
+    }
+    s_session.cmd_ctr++;
+    return HAL_NFC_OK;
 }
