@@ -207,25 +207,119 @@ static void wiping_free(void *ptr)
     free(ptr);
 }
 
+static size_t utf8_sequence_length(const unsigned char *s, size_t n)
+{
+    static const uint32_t smallest[] = { 0, 0, 0x80, 0x800, 0x10000 };
+    size_t len = (s[0] & 0xE0) == 0xC0 ? 2 : (s[0] & 0xF0) == 0xE0 ? 3 : (s[0] & 0xF8) == 0xF0 ? 4 : 0;
+    if (len == 0 || n < len) {
+        return 0;
+    }
+    uint32_t cp = s[0] & (0x7F >> len);
+    for (size_t k = 1; k < len; k++) {
+        if ((s[k] & 0xC0) != 0x80) {
+            return 0;
+        }
+        cp = (cp << 6) | (s[k] & 0x3F);
+    }
+    bool surrogate = cp >= 0xD800 && cp <= 0xDFFF;
+    return (cp < smallest[len] || cp > 0x10FFFF || surrogate) ? 0 : len;
+}
+
+static size_t digit_count(const char *s, size_t n)
+{
+    size_t k = 0;
+    while (k < n && isdigit((unsigned char)s[k])) {
+        k++;
+    }
+    return k;
+}
+
+static bool json_number_valid(const char *s, size_t n)
+{
+    size_t i = (n > 0 && s[0] == '-') ? 1 : 0;
+    size_t d = digit_count(&s[i], n - i);
+    if (d == 0 || (d > 1 && s[i] == '0')) {
+        return false;
+    }
+    i += d;
+    if (i < n && s[i] == '.') {
+        d = digit_count(&s[i + 1], n - i - 1);
+        if (d == 0) {
+            return false;
+        }
+        i += 1 + d;
+    }
+    if (i < n && (s[i] == 'e' || s[i] == 'E')) {
+        i += (i + 1 < n && (s[i + 1] == '+' || s[i + 1] == '-')) ? 2 : 1;
+        d = digit_count(&s[i], n - i);
+        if (d == 0) {
+            return false;
+        }
+        i += d;
+    }
+    return i == n;
+}
+
+/* cJSON's parse_number() reads every following byte from this set and hands it to strtod(). */
+static size_t cjson_number_length(const char *s, size_t n)
+{
+    size_t k = 0;
+    while (k < n && s[k] != '\0' && strchr("0123456789+-eE.", s[k]) != NULL) {
+        k++;
+    }
+    return k;
+}
+
+static const char *json_escape_problem(const char *s, size_t n)
+{
+    if (n < 2) {
+        return NULL;
+    }
+    if ((unsigned char)s[1] < 0x20) {
+        return "a control character";
+    }
+    if (s[1] != 'u') {
+        return NULL;
+    }
+    if (n < 6 || !isxdigit((unsigned char)s[2]) || !isxdigit((unsigned char)s[3]) || !isxdigit((unsigned char)s[4]) ||
+            !isxdigit((unsigned char)s[5])) {
+        return "a \\u escape without 4 hex digits";
+    }
+    return memcmp(&s[2], "0000", 4) == 0 ? "a NUL character" : NULL;
+}
+
 /* cJSON hands out strings that end at the first NUL, decodes a \u escape with a bad hex digit as NUL,
- * and skips every byte below 0x20 after the value, so these writes would parse into another value. */
+ * skips every byte below 0x20 after the value and a leading byte order mark, keeps raw control bytes and
+ * invalid UTF-8 inside a string, and lets strtod() accept numbers such as 01 and 1., all of which RFC 8259
+ * forbids, so cJSON and a strict parser would read these writes differently. */
 static const char *json_text_problem(const char *text, size_t len)
 {
+    if (len >= 3 && memcmp(text, "\xEF\xBB\xBF", 3) == 0) {
+        return "a byte order mark";
+    }
+    bool in_string = false;
     for (size_t i = 0; i < len; i++) {
-        if ((unsigned char)text[i] < 0x20 && text[i] != '\t' && text[i] != '\n' && text[i] != '\r') {
-            return "a control character";
+        unsigned char c = (unsigned char)text[i];
+        size_t step = 1;
+        const char *problem = NULL;
+        if (c < 0x20 && (in_string || (c != '\t' && c != '\n' && c != '\r'))) {
+            problem = "a control character";
+        } else if (c >= 0x80) {
+            step = utf8_sequence_length((const unsigned char *)&text[i], len - i);
+            problem = step == 0 ? "invalid UTF-8" : NULL;
+        } else if (c == '"') {
+            in_string = !in_string;
+        } else if (c == '\\') {
+            problem = json_escape_problem(&text[i], len - i);
+            step = 2;
+        } else if (!in_string && (c == '-' || isdigit(c))) {
+            step = cjson_number_length(&text[i], len - i);
+            problem = json_number_valid(&text[i], step) ? NULL : "a malformed number";
         }
-        if (text[i] != '\\' || i + 1 == len || text[++i] != 'u') {
-            continue;
+        if (problem != NULL) {
+            return problem;
         }
-        if (len - i < 5 || !isxdigit((unsigned char)text[i + 1]) || !isxdigit((unsigned char)text[i + 2]) ||
-                !isxdigit((unsigned char)text[i + 3]) || !isxdigit((unsigned char)text[i + 4])) {
-            return "a \\u escape without 4 hex digits";
-        }
-        if (memcmp(&text[i + 1], "0000", 4) == 0) {
-            return "a NUL character";
-        }
-        i += 4;
+        i += step - 1;
     }
     return NULL;
 }

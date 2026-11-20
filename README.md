@@ -170,7 +170,8 @@ The device returns `0x13` in these cases.
 
 - The write is not one JSON object with only whitespace after it.
 - The object repeats a top-level member name, also when one spelling uses `\u` escapes, such as `deviceId` and `device\u0049d`. Names are compared case-sensitively. Other members whose top-level names are unique are ignored, whatever they hold.
-- The write holds a NUL character, raw or as the escape `\u0000`, a control byte below `0x20` other than tab, line feed and carriage return, or a `\u` escape without 4 hex digits.
+- The write holds a NUL character, raw or as the escape `\u0000`, a raw control byte below `0x20` inside a string, which a client must escape (for example `\t`), a control byte other than tab, line feed and carriage return between JSON tokens, or a `\u` escape without 4 hex digits.
+- The write is not valid UTF-8, starts with a byte order mark, or holds a number that RFC 8259 does not allow, such as `01`, `1.` or `-.5`. An SSID that is not valid UTF-8 cannot be set, because JSON text cannot carry such bytes.
 - WIFI_CONFIG has no `ssid`, or an `ssid` or a `password` that is not a string.
 - URL_SET has no `deviceId`, or one that is not a string.
 
