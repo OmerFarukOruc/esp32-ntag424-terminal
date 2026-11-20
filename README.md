@@ -354,16 +354,15 @@ pre-commit run --all-files
 
 Commit messages follow Conventional Commits, for example `fix(hal_ble): reject an empty ssid`. The subject needs at least 10 characters.
 
-CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and on tags that start with `v`. It has six jobs.
+CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and on tags that start with `v`. It has five jobs.
 
 - `pre-commit` runs the pre-commit stage hooks except `gitleaks`.
 - `gitleaks` scans the full git history.
-- `build` runs `idf.py build` in the `espressif/idf:v6.1` container, fails when the build changes `dependencies.lock`, and uploads the firmware files.
+- `build` runs in the `espressif/idf:v6.1` container once per configuration: `default` builds `sdkconfig.defaults`, and each other leg adds one `sdkconfig.ci.*` file on top. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build. Each leg fails when the build changes `dependencies.lock`, and restores its ccache folder from the GitHub Actions cache. Only runs on `main` save that folder, so pull requests and tags reuse the compiler output of the newest `main` run. The `default` leg uploads the firmware files.
 - `host-tests` runs `test/host/run.sh` in the same container.
-- `build-kconfig` builds once with each `sdkconfig.ci.*` file on top of `sdkconfig.defaults`. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build.
-- `publish` runs only for a `v*` tag, and only after the other five jobs pass.
+- `publish` runs only for a `v*` tag, and only after the other four jobs pass.
 
-For a `v*` tag, `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule, the managed cJSON component, the resolved `sdkconfig` and a `version.txt` with the tag. The archive therefore rebuilds without network access and gives the firmware the tag as its version. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
+For a `v*` tag, the `default` leg of `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule, the managed cJSON component, the resolved `sdkconfig` and a `version.txt` with the tag. The archive therefore rebuilds without network access and gives the firmware the tag as its version. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
 
 `test/host/run.sh` builds the state machine, the BLE, network, NFC, power and button HALs, the PN532 driver wrapper and the vendored PN532 driver for the host with AddressSanitizer and UBSan, against stand-ins for ESP-IDF, FreeRTOS and NimBLE, and runs one suite per area. It needs gcc, the OpenSSL `libcrypto` headers, and the `managed_components/` folder that `idf.py build` or `idf.py reconfigure` creates. A passing run says nothing about the PN532, the tag, or the radio, because the stand-ins answer as the code expects.
 

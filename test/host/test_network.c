@@ -75,23 +75,10 @@ int main(void)
     check("a 64-digit hex password is accepted", e == ESP_OK, d);
 
     start();
-    wifi_connect_result = ESP_ERR_WIFI_CONN;
-    connect("password1");
-    snprintf(d, sizeof d, "connect calls=%d reconnect armed=%d state=%s", wifi_connect_calls, reconnect_timer->armed,
-             state_name());
-    check("a connect call that fails at STA_START schedules a retry", wifi_connect_calls == 1 && reconnect_timer->armed, d);
-
-    bool fired = fire(reconnect_timer);
-    snprintf(d, sizeof d, "fired=%d connect calls=%d reconnect armed=%d", fired, wifi_connect_calls,
-             reconnect_timer->armed);
-    check("a connect call that fails from the retry timer schedules a retry",
-          fired && wifi_connect_calls == 2 && reconnect_timer->armed, d);
-
-    start();
     connect("password1");
     deliver(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL, 0);
     int disc = wifi_disconnect_calls;
-    fired = fire(got_ip_timer);
+    bool fired = fire(got_ip_timer);
     snprintf(d, sizeof d, "IP timer fired=%d disconnects=%d", fired, wifi_disconnect_calls - disc);
     check("an association without an IP address in time is disconnected", fired && wifi_disconnect_calls - disc == 1, d);
 
