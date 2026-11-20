@@ -230,9 +230,18 @@ static const char *json_text_problem(const char *text, size_t len)
     return NULL;
 }
 
-/* Checks that the reply on chr can reach the client, then reads the write into a stack buffer that is
- * wiped before return and parses it. The write must be one JSON value with nothing but whitespace after
- * it. Returns 0 or an ATT error code. */
+static bool member_names_unique(const cJSON *object)
+{
+    for (const cJSON *a = object->child; a != NULL; a = a->next) {
+        for (const cJSON *b = a->next; b != NULL; b = b->next) {
+            if (strcmp(a->string, b->string) == 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static int parse_request(uint16_t conn_handle, notify_chr_t *chr, struct os_mbuf *om, cJSON **json)
 {
     int att = reply_possible(conn_handle, chr);
@@ -255,8 +264,12 @@ static int parse_request(uint16_t conn_handle, notify_chr_t *chr, struct os_mbuf
     } else {
         buf[copied] = '\0';
         *json = cJSON_ParseWithOpts(buf, NULL, true);
-        if (*json == NULL) {
-            ESP_LOGW(TAG, "Write is not one JSON value (%u bytes)", (unsigned)copied);
+        const char *shape_problem = !cJSON_IsObject(*json) ? "is not one JSON object"
+                                    : !member_names_unique(*json) ? "repeats a member name" : NULL;
+        if (shape_problem != NULL) {
+            ESP_LOGW(TAG, "Write %s (%u bytes)", shape_problem, (unsigned)copied);
+            cJSON_Delete(*json);
+            *json = NULL;
             att = BLE_ATT_ERR_VALUE_NOT_ALLOWED;
         }
     }
@@ -309,7 +322,6 @@ static int parse_device_id(const cJSON *json, char *out)
     return 0;
 }
 
-/* The parsed password stays in the cJSON string until it is freed. */
 static int device_info_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                                   struct ble_gatt_access_ctxt *ctxt, void *arg)
 {

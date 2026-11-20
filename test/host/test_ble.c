@@ -200,6 +200,33 @@ int main(void)
     check_rejected("a \\u escape whose 3rd digit is not hex is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"AB\\u00Z1CD\"}"));
     check_rejected("a \\u escape whose 4th digit is not hex is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"AB\\u004ZCD\"}"));
     check_rejected("a control byte after the JSON value is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"ABCD\"}\x01"));
+    check_rejected("two deviceId members with different values are rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"FIRST\",\"deviceId\":\"SECOND\"}"));
+    check_rejected("two deviceId members with the same value are rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"SAME\",\"deviceId\":\"SAME\"}"));
+    check_rejected("a second deviceId spelled with a \\u escape, after another member, is rejected",
+                   WRITE(url_set_chr_access, "{\"deviceId\":\"FIRST\",\"n\":1,\"device\\u0049d\":\"SECOND\"}"));
+    check_rejected("a repeated unknown member is rejected", WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"x\":1,\"x\":2}"));
+    check_rejected("two ssid members are rejected", WRITE(wifi_config_chr_access, "{\"ssid\":\"A\",\"ssid\":\"B\"}"));
+    secret_frees = 0;
+    att = WRITE(wifi_config_chr_access, "{\"ssid\":\"A\",\"password\":\"" SECRET "\",\"password\":\"87654321\"}");
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d, freed heap blocks holding 4 bytes of the password=%d", att, cb_count,
+             secret_frees);
+    check("two password members are rejected, and the parsed password is wiped before it is freed",
+          att == BLE_ATT_ERR_VALUE_NOT_ALLOWED && cb_count == 0 && secret_frees == 0, d);
+    check_rejected("an array is rejected", WRITE(url_set_chr_access, "[\"deviceId\",\"SHOP\"]"));
+    att = WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"note\":{\"a\":1},\"n\":2}");
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d id=%s", att, cb_count, cb_count ? cb_data : "-");
+    check("unique unknown members next to deviceId are accepted", att == 0 && cb_count == 1 && strcmp(cb_data, "SHOP") == 0, d);
+    att = WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"note\":{\"a\":1,\"a\":2}}");
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d id=%s", att, cb_count, cb_count ? cb_data : "-");
+    check("a repeated name inside a nested object is accepted", att == 0 && cb_count == 1 && strcmp(cb_data, "SHOP") == 0, d);
+    att = WRITE(url_set_chr_access, "{\"deviceId\":\"SHOP\",\"DeviceId\":0}");
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d id=%s", att, cb_count, cb_count ? cb_data : "-");
+    check("names that differ only in case are different members", att == 0 && cb_count == 1 && strcmp(cb_data, "SHOP") == 0, d);
+    att = WRITE(wifi_scan_chr_access, "not json");
+    snprintf(d, sizeof d, "ATT=0x%02x events=%d", att, cb_count);
+    check("WIFI_SCAN accepts any bytes", att == 0 && cb_count == 1, d);
 
     att = WRITE(wifi_config_chr_access, "{\"ssid\":\"a\\\\u0000b\",\"password\":\"12345678\"}");
     const char *ssid = ((hal_ble_wifi_config_t *)cb_data)->ssid;

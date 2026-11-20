@@ -162,13 +162,14 @@ ATT errors on a write:
 
 The device returns `0x0D` in these cases.
 
-- The write is empty or longer than 200 bytes.
+- A WIFI_CONFIG or URL_SET write is empty or longer than 200 bytes. WIFI_SCAN accepts any write.
 - WIFI_CONFIG has an empty `ssid`, an `ssid` over 32 bytes, or a `password` over 64 bytes.
 - URL_SET has an empty `deviceId` or one over 31 bytes.
 
 The device returns `0x13` in these cases.
 
-- The write is not one JSON value with only whitespace after it.
+- The write is not one JSON object with only whitespace after it.
+- The object repeats a top-level member name, also when one spelling uses `\u` escapes, such as `deviceId` and `device\u0049d`. Names are compared case-sensitively. Other members whose top-level names are unique are ignored, whatever they hold.
 - The write holds a NUL character, raw or as the escape `\u0000`, a control byte below `0x20` other than tab, line feed and carriage return, or a `\u` escape without 4 hex digits.
 - WIFI_CONFIG has no `ssid`, or an `ssid` or a `password` that is not a string.
 - URL_SET has no `deviceId`, or one that is not a string.
