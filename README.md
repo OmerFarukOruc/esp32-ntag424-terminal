@@ -217,7 +217,7 @@ The `ssid` is 1 to 32 bytes. The `password` is empty or 8 to 64 bytes. A 64-byte
 {"success":false,"ip":"","msg":"WiFi connection failed"}
 ```
 
-`ip` is always an empty string. The failure notification arrives when the WiFi driver rejects the credentials at once. It also arrives after 3 failed attempts that mean wrong credentials or no matching access point (a few tens of seconds), or after 10 failed attempts for any other reason (about 3 minutes). A short press that ends the attempt early sends no result. The WiFi driver stores the credentials in NVS, so the device reconnects after a reboot.
+`ip` is always an empty string. The failure notification arrives when the WiFi driver rejects the credentials at once. It also arrives after 3 failed attempts that mean wrong credentials or no matching access point (a few tens of seconds), or after 10 failed attempts for any other reason (about 3 minutes). An attempt that joins the access point but gets no IP address within 30 s, or whose connect call fails at once, counts as a failed attempt, and each such attempt adds up to 30 s. A short press that ends the attempt early sends no result. The WiFi driver stores the credentials in NVS, so the device reconnects after a reboot.
 
 ### URL_SET
 

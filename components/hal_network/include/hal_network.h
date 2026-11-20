@@ -88,7 +88,9 @@ esp_err_t hal_network_deinit(void);
  * with these credentials, 3 failed attempts whose reason means wrong
  * credentials or no matching access point end the retries (a few tens of
  * seconds). Any other failure reason, or a connection that worked before,
- * follows the 10 attempt rule (about 3 minutes). The credentials persist, so
+ * follows the 10 attempt rule (about 3 minutes). An attempt that joins the
+ * access point but gets no IP address within 30 s, or whose connect call
+ * fails at once, counts as failed. The credentials persist, so
  * the device reconnects after a reboot.
  *
  * Replaces any current connection. When this function fails after it stopped

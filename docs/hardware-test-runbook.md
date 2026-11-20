@@ -128,6 +128,7 @@ Expect `hal_network: WiFi disconnected, reason: <n>`, then `Reconnecting in 1000
 | Retries continue | `Reconnecting in 30000 ms` keeps appearing | [ ] |
 | Link returns | `Got IP`, `Device idle, WiFi connected`, LED green | [ ] |
 | SNTP | Nothing stops SNTP on a disconnect. `SNTP sync started` appears again after each `Got IP`, with one `Time synchronized` and no `SNTP init failed` line | [ ] |
+| No DHCP | With a DHCP server that does not answer (for example its pool is full), 30 s after joining the log shows `No IP address 30 s after joining, disconnecting`, then `WiFi disconnected, reason: 8` and `Reconnecting in <n> ms (attempt <n>)` | [ ] |
 | Disassociation reason 8 | When the access point drops the device with reason 8 (for example from its admin page), the log shows `WiFi disconnected, reason: 8` and then `Reconnecting in <n> ms (attempt <n>)`, and the device reconnects | [ ] |
 | No LED errors | No `LED update failed` line appears during the reconnects | [ ] |
 
