@@ -29,8 +29,10 @@ menu "HAL NFC"
             URL prefix written into the NTAG424 DNA NDEF file. The terminal
             appends "/<device_id>?picc_data=<32 hex>&cmac=<16 hex>" and lets the
             tag fill the placeholders through Secure Dynamic Messaging. The
-            backend that receives the tap must serve this path. Do not end the
-            value with a slash. The value may be at most 139 characters so the
+            backend that receives the tap must serve this path. The value is
+            http:// or https://, a host name, an optional port and an optional
+            path, with no query, fragment, space or trailing slash; the build
+            fails otherwise. The value may be at most 139 characters so the
             whole NDEF file fits one DESFire WriteData frame; the build fails
             when it is longer.
 
@@ -38,8 +40,9 @@ menu "HAL NFC"
             place, the factory all-zero AES-128 keys (key 0 and the SDM file
             read key). It never calls ChangeKey, because an interrupted key
             change can lock a tag for good. Anyone who knows this firmware can
-            therefore decrypt picc_data and compute a valid cmac, so SDM proves
-            only that a tap happened, not that a genuine tag produced it. A tag
+            therefore decrypt picc_data and compute a valid cmac for any UID
+            and counter without a tag, so a valid request shows neither that a
+            tag was tapped nor that a genuine tag produced it. A tag
             whose key 0 was changed cannot be configured by this firmware.
 
 endmenu

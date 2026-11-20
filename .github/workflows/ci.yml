@@ -76,11 +76,14 @@ jobs:
         run: . "$IDF_PATH/export.sh" && idf.py merge-bin -o "esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin"
       # The firmware links the GPL-3.0 PN532 library, so the release carries the
       # complete source including the submodule, which GitHub's tag archive omits.
+      # The managed components, the resolved sdkconfig and version.txt let the
+      # archive rebuild offline with the tag as the firmware version.
       - name: Collect the release files
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir dist
-          git ls-files -z --recurse-submodules \
+          printf '%s\n' "$GITHUB_REF_NAME" > version.txt
+          { git ls-files -z --recurse-submodules; printf '%s\0' version.txt sdkconfig; find managed_components -type f -print0; } \
             | tar --null -T - --transform "s,^,esp32-ntag424-terminal-${GITHUB_REF_NAME}/," \
                 -czf "dist/esp32-ntag424-terminal-${GITHUB_REF_NAME}-source.tar.gz"
           cp "build/esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin" build/esp32-ntag424-terminal.elf dist/

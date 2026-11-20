@@ -99,7 +99,7 @@ Run `idf.py menuconfig` and open **Component config**. `sdkconfig.defaults` hold
 
 Set these before you flash.
 
-- **`HAL_NFC_SDM_BASE_URL`** is the URL prefix written to the tag. Point it at the backend that serves the tap URL. Do not end it with a slash. It can be at most 139 characters, and the build fails when it is longer.
+- **`HAL_NFC_SDM_BASE_URL`** is the URL prefix written to the tag. Point it at the backend that serves the tap URL. It is `http://` or `https://`, a host name, an optional port and an optional path, with no query, fragment, space or trailing slash. It can be at most 139 characters. The build fails when the value breaks either rule.
 - **Pins.** Change the NFC, button, LED, and buzzer GPIOs when your wiring differs from the table above.
 - **Buzzer.** Pick `HAL_INDICATOR_BUZZER_ACTIVE` or `HAL_INDICATOR_BUZZER_PASSIVE` to match your part. `HAL_INDICATOR_BUZZER_ACTIVE_LOW` applies to active buzzers only. Turn it on when the buzzer sounds with the pin at 0 V.
 - **Button.** `HAL_BUTTON_INTERNAL_PULLUP` is offered only when `HAL_BUTTON_ACTIVE_LOW` is on, because the pull-up needs a button that reads low when pressed.
@@ -136,12 +136,13 @@ Service UUID: `67cb0001-25fe-42d1-9fce-8bf97986312f`
 
 ### Pairing and writes
 
-The three write characteristics need an encrypted link. The device pairs with LE Secure Connections using Just Works (no passkey) and stores the bond in NVS. DEVICE_INFO can be read without pairing.
+The three write characteristics, and switching on their notifications, need an encrypted link. The device pairs with LE Secure Connections using Just Works (no passkey) and stores the bond in NVS. DEVICE_INFO can be read without pairing.
 
-- A write on an unencrypted link fails with an ATT error (ATT is the attribute protocol that GATT writes use). The code is `0x05` when the device has no stored key for the phone and `0x0F` when it has one. Both make the phone start pairing or encrypt the link, and the client repeats the write.
+- A write, or a notification switch, on an unencrypted link fails with an ATT error (ATT is the attribute protocol that GATT writes use). The code is `0x05` when the device has no stored key for the phone and `0x0F` when it has one. Both make the phone start pairing or encrypt the link, and the client repeats the write.
 - Writes use the acknowledged ATT write, so the client sees errors.
-- Enable notifications (the CCCD, the descriptor that switches notifications on) on a characteristic before you write to it. Without that, the device cannot send its reply and logs `Client has not enabled notifications on this characteristic`.
-- Request an ATT MTU (the largest packet the link carries) of at least 100 bytes. A notification must fit in MTU minus 3 bytes. The device cannot start the MTU exchange itself. With the default 23-byte MTU it skips every scan entry and cannot send the `done` notification either, so a client that waits for `done` waits forever.
+- Enable notifications (the CCCD, the descriptor that switches notifications on) on a characteristic before you write to it. Without that, the write fails with ATT error `0xFD`, because the device could not send its reply.
+- Request an ATT MTU (the largest packet the link carries) of at least 100 bytes. A notification must fit in MTU minus 3 bytes. The device cannot start the MTU exchange itself. With a smaller MTU, a write fails with ATT error `0xFC`.
+- An acknowledged write gets its reply notification while the client stays connected, with two exceptions: a second WIFI_SCAN from the same connection while its scan runs (the running scan's terminator answers both), and a WIFI_CONFIG whose connect attempt a short press ends. When the device cannot queue the request, the write fails with ATT error `0x11` and the client can repeat it.
 - A WIFI_CONFIG or URL_SET write may be at most 200 bytes.
 - When pairing fails, the device ends the connection. When a phone pairs again after it lost its bond, the device drops its old bond and accepts the new pairing.
 
@@ -154,6 +155,9 @@ ATT errors on a write:
 | `0x0D` | Invalid Attribute Value Length | A length is wrong, see below |
 | `0x13` | Value Not Allowed | The content is wrong, see below |
 | `0x0E` | Unlikely Error | The device could not copy the write |
+| `0x11` | Insufficient Resources | The device is busy and could not queue the request. Repeat the write. |
+| `0xFC` | Write Request Rejected | The ATT MTU is below 100 bytes |
+| `0xFD` | CCCD Improperly Configured | Notifications are off on this characteristic |
 
 The device returns `0x0D` in these cases.
 
@@ -163,7 +167,8 @@ The device returns `0x0D` in these cases.
 
 The device returns `0x13` in these cases.
 
-- The write is not valid JSON.
+- The write is not one JSON value with only whitespace after it.
+- The write holds a NUL character, raw or as the escape `\u0000`, a control byte below `0x20` other than tab, line feed and carriage return, or a `\u` escape without 4 hex digits.
 - WIFI_CONFIG has no `ssid`, or an `ssid` or a `password` that is not a string.
 - URL_SET has no `deviceId`, or one that is not a string.
 
@@ -193,9 +198,9 @@ A final notification ends the scan:
 {"done":true,"count":4,"skipped":0}
 ```
 
-`count` is the number of network notifications sent. `skipped` is the number of networks whose JSON did not fit in MTU minus 3 bytes. A failed or empty scan sends only the terminator with `count` 0. The client treats the scan as complete when it sees `done`.
+`count` is the number of network notifications sent. `skipped` is the number of networks not sent, because their JSON did not fit in MTU minus 3 bytes or a send failed, so `count` plus `skipped` is the number of networks found. A failed or empty scan sends only the terminator with `count` 0. The client treats the scan as complete when it sees `done`.
 
-The device runs a scan only during onboarding. Outside onboarding it answers with the empty terminator at once, and it ignores a request while a scan runs.
+The device runs a scan only during onboarding. Outside onboarding, and after a critical battery warning, it answers with the empty terminator at once. While a scan runs, it ignores a second request from the same connection and answers a request from another connection with the empty terminator.
 
 ### WIFI_CONFIG
 
@@ -205,14 +210,14 @@ Write the credentials:
 {"ssid":"MyNetwork","password":"secret"}
 ```
 
-The `ssid` is 1 to 32 bytes. The `password` is empty or 8 to 64 bytes (64 bytes means a hex key). Leave it empty or omit it for an open network. A password of 1 to 7 bytes gets the failure notification at once, and the current connection stays up. With a password, the device joins only WPA2 and WPA3 networks, not WEP or WPA-only ones. After the connect attempt, the device sends one notification:
+The `ssid` is 1 to 32 bytes. The `password` is empty or 8 to 64 bytes. A 64-byte password is the key itself and must be 64 hex digits. Leave it empty or omit it for an open network. A password of 1 to 7 bytes, or a 64-byte password with a character that is not a hex digit, gets the failure notification at once, and the current connection stays up. With a password, the device joins only WPA2 and WPA3 networks, not WEP or WPA-only ones. After the connect attempt, the device sends one notification:
 
 ```json
 {"success":true,"ip":"","msg":"WiFi connected successfully"}
 {"success":false,"ip":"","msg":"WiFi connection failed"}
 ```
 
-`ip` is always an empty string. The failure notification arrives when the WiFi driver rejects the credentials at once. It also arrives after 3 failed attempts that mean wrong credentials or no matching access point (a few tens of seconds), or after 10 failed attempts for any other reason (about 3 minutes). A short press that ends the attempt early sends no result. The WiFi driver stores the credentials in NVS, so the device reconnects after a reboot.
+`ip` is always an empty string. The failure notification arrives when the WiFi driver rejects the credentials at once. It also arrives after 3 failed attempts that mean wrong credentials or no matching access point (a few tens of seconds), or after 10 failed attempts for any other reason (about 3 minutes). An attempt that joins the access point but gets no IP address within 30 s, or whose connect call fails at once, counts as a failed attempt, and each such attempt adds up to 30 s. A short press that ends the attempt early sends no result. The WiFi driver stores the credentials in NVS, so the device reconnects after a reboot.
 
 ### URL_SET
 
@@ -222,7 +227,7 @@ Write the device id:
 {"deviceId":"SHOP_01"}
 ```
 
-The id is 1 to 31 characters from `A-Z a-z 0-9 _ -`. The device checks the id first, and a bad character returns code 1006 in the result notification, not an ATT error. It then waits up to 15 s for a tag on the PN532. Each of up to 4 retries waits up to 5 s, and the write gives up after 30 s in total. A wrong key 0, a tag that is not an NTAG424 DNA, and a tag without the NDEF application end the write after the first attempt. Put the tag on the antenna before or right after the write. When the write succeeds, the device stores the id in NVS, and DEVICE_INFO reports it from then on.
+The id is 1 to 31 characters from `A-Z a-z 0-9 _ -`. The device checks the id first, and a bad character returns code 1006 in the result notification, not an ATT error. It then waits up to 15 s for a tag on the PN532. Each of up to 4 retries waits up to 5 s, and the write gives up 30 s after it starts, counting PN532 recovery. No tag command starts after that, so a write that runs out of time after writing the URL leaves the URL on the tag, and whether SDM is on is not confirmed. A wrong key 0, a tag that is not an NTAG424 DNA, and a tag without the NDEF application end the write after the first attempt. Put the tag on the antenna before or right after the write. When the write succeeds, the device stores the id in NVS, and DEVICE_INFO reports it from then on.
 
 The result arrives as one notification:
 
@@ -239,10 +244,10 @@ The result arrives as one notification:
 | 1004 | `tag_auth_failed` | The tag rejected key 0 |
 | 1005 | `sdm_timeout` | The 30 s limit passed, or a PN532 exchange timed out on the last attempt. A tag that is missing the whole time usually ends here, because the first 15 s window and the 5 s retry windows add up to more than 30 s. |
 | 1006 | `invalid_device_id` | The id has a bad length or character |
-| 1007 | `unsupported_tag_capability` | The tag lacks a required capability, for example the NDEF application |
+| 1007 | `unsupported_tag_capability` | The tag lacks a required capability: it has no NDEF application, it is not an NTAG 424 DNA by its GetVersion answer, or its file 02 is not a standard data file that key 0 may reconfigure and that holds the URL. The device checks this before it writes anything. |
 | 1099 | `sdm_config_failed` | Any other failure, such as a framing error or an unexpected status from the tag |
 
-Code 1099 also comes with `nfc_config_busy` (a tag write is already running), `not_onboarding` (the device left onboarding while the client stayed connected) and `nfc_config_task_create_failed` (out of memory). A WIFI_CONFIG sent during a tag write or outside onboarding gets a WIFI_CONFIG failure notification. The device sends no result when the client disconnects before the write ends, or when the client has not enabled notifications on URL_SET.
+Code 1099 also comes with `tag_configured_id_not_saved` (the tag holds the new URL, but saving the id in NVS failed, so DEVICE_INFO keeps the old id), `tag_configured_id_not_published` (the tag holds the new URL and NVS the new id, but DEVICE_INFO shows it only after a reboot), `nfc_config_busy` (a tag write is already running), `not_onboarding` (the device left onboarding while the client stayed connected), `low_battery` (a critical battery warning came in and the device sleeps once the running work ends) and `nfc_config_task_create_failed` (out of memory). A WIFI_CONFIG sent during a tag write, outside onboarding or after a critical battery warning gets a WIFI_CONFIG failure notification. The device sends no result when the client disconnects before the write ends, or when the client turned notifications off on URL_SET during the write. A result goes only to the connection that sent the request, never to a client that connected later.
 
 ## SDM URL and backend verification
 
@@ -265,18 +270,26 @@ A backend verifies a request in these steps.
 2. Build the session vector `3CC300010080 || UID || counter` (16 bytes, counter as read from the plaintext). The session MAC key is the AES-CMAC of that vector under key 2.
 3. Compute the AES-CMAC of the empty message under the session MAC key. The firmware sets the MAC input offset equal to the MAC offset, so nothing is MACed.
 4. Keep bytes 1, 3, 5 up to 15 of the 16 byte result. This 8 byte value must equal `cmac`.
-5. Accept the request only when the counter is greater than the last counter seen for that UID. The counter rises with every NDEF read, not with every tap. A phone that polls the tag reads many times, so do not require `last + 1`. The counter has 24 bits.
+5. Accept the request only when the counter is greater than the last counter seen for that UID. The counter rises with every NDEF read, not with every tap. A phone that polls the tag reads many times, so do not require `last + 1`. The counter has 24 bits. Compare and store the counter in one atomic step per UID, so two requests with the same counter cannot both pass. Also check that the UID belongs to the `<device_id>` in the path, because the tag MACs only its UID and counter, not the URL.
 
-This Python function implements the steps. It needs the `cryptography` package, and the all-zero key stands for the factory key:
+This Python function implements steps 1 to 4 and the counter comparison of step 5. It needs the `cryptography` package, and the all-zero key stands for the factory key. It returns the UID and counter of a valid request, and `None` for any other input, including hex of the wrong length. The caller still does two parts of step 5: it stores the returned counter for that UID in the same atomic step as the read of `last_counter`, and it checks that the UID belongs to the `<device_id>` in the path.
 
 ```python
+import hmac
+import re
+
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.cmac import CMAC
 
 KEY = bytes(16)
+HEX = re.compile(r"[0-9A-Fa-f]*")
 
 
 def verify(picc_hex, cmac_hex, last_counter):
+    if not (isinstance(picc_hex, str) and isinstance(cmac_hex, str)):
+        return None
+    if len(picc_hex) != 32 or len(cmac_hex) != 16 or not HEX.fullmatch(picc_hex + cmac_hex):
+        return None
     dec = Cipher(algorithms.AES(KEY), modes.CBC(bytes(16))).decryptor()
     plain = dec.update(bytes.fromhex(picc_hex)) + dec.finalize()
     if plain[0] != 0xC7:
@@ -286,7 +299,7 @@ def verify(picc_hex, cmac_hex, last_counter):
     mac_key.update(bytes.fromhex("3CC300010080") + uid + plain[8:11])
     mac = CMAC(algorithms.AES(mac_key.finalize()))
     mac.update(b"")
-    if mac.finalize()[1::2] != bytes.fromhex(cmac_hex) or counter <= last_counter:
+    if not hmac.compare_digest(mac.finalize()[1::2], bytes.fromhex(cmac_hex)) or counter <= last_counter:
         return None
     return uid.hex().upper(), counter
 ```
@@ -307,7 +320,7 @@ printf '' | openssl mac -cipher AES-128-CBC -macopt hexkey:$SK CMAC
 
 This firmware is a demo. Treat it that way until per-tag keys exist.
 
-- **Factory keys on the tag.** The tags keep NXP's factory all-zero AES-128 keys. The firmware authenticates with key 0 and never calls ChangeKey, because an interrupted key change can lock a tag for good. Anyone who knows this firmware can decrypt `picc_data` and forge a valid `cmac`. SDM then shows only that a tap happened, not that a genuine tag produced it. A tag whose key 0 was changed cannot be configured by this firmware.
+- **Factory keys on the tag.** The tags keep NXP's factory all-zero AES-128 keys. The firmware authenticates with key 0 and never calls ChangeKey, because an interrupted key change can lock a tag for good. Anyone who knows this firmware can decrypt `picc_data` and compute a valid `cmac` for any UID and counter, without a tag. A request that passes the check therefore shows neither that a tag was tapped nor that a genuine tag produced it. The demo shows the SDM calculation only. A tag whose key 0 was changed cannot be configured by this firmware.
 - **Plain NVS.** NVS is not encrypted and flash encryption is off. The WiFi credentials, the BLE bond keys, and the device id sit in plain flash and can be read from the chip.
 - **Just Works pairing.** BLE pairing has no passkey and no man-in-the-middle protection. A device in range that connects during onboarding can pair, then read DEVICE_INFO, scan, write WiFi credentials, and write the device id. Run onboarding only in a place you trust, and only for as long as it takes.
 - **Open onboarding window.** The device advertises until a short press, a 3 s hold, or a WIFI_CONFIG ends it. Nothing times it out.
@@ -349,7 +362,7 @@ CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and 
 - `build-kconfig` builds once with each `sdkconfig.ci.*` file on top of `sdkconfig.defaults`. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build.
 - `publish` runs only for a `v*` tag, and only after the other four jobs pass.
 
-For a `v*` tag, `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
+For a `v*` tag, `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule, the managed cJSON component, the resolved `sdkconfig` and a `version.txt` with the tag. The archive therefore rebuilds without network access and gives the firmware the tag as its version. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
 
 Agent and contributor rules are in [AGENTS.md](AGENTS.md). The checklist for testing on real hardware is [docs/hardware-test-runbook.md](docs/hardware-test-runbook.md).
 

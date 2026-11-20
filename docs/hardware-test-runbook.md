@@ -128,6 +128,7 @@ Expect `hal_network: WiFi disconnected, reason: <n>`, then `Reconnecting in 1000
 | Retries continue | `Reconnecting in 30000 ms` keeps appearing | [ ] |
 | Link returns | `Got IP`, `Device idle, WiFi connected`, LED green | [ ] |
 | SNTP | Nothing stops SNTP on a disconnect. `SNTP sync started` appears again after each `Got IP`, with one `Time synchronized` and no `SNTP init failed` line | [ ] |
+| No DHCP | With a DHCP server that does not answer (for example its pool is full), 30 s after joining the log shows `No IP address 30 s after joining, disconnecting`, then `WiFi disconnected, reason: 8` and `Reconnecting in <n> ms (attempt <n>)` | [ ] |
 | Disassociation reason 8 | When the access point drops the device with reason 8 (for example from its admin page), the log shows `WiFi disconnected, reason: 8` and then `Reconnecting in <n> ms (attempt <n>)`, and the device reconnects | [ ] |
 | No LED errors | No `LED update failed` line appears during the reconnects | [ ] |
 
@@ -182,18 +183,24 @@ The device does not leave onboarding on its own. Enter it again before you conti
 3. Enable notifications on WIFI_SCAN, WIFI_CONFIG, and URL_SET.
 4. Write any byte to WIFI_SCAN.
 
-Expect `hal_ble: BLE connected, conn_handle=<n>`, `MTU update: conn_handle=<n>, mtu=<n>`, and one `Subscribe: conn_handle=<n> attr_handle=<n> notify:0->1` line for each characteristic you enabled. The write in step 4 fails with ATT error `0x05` (Insufficient Authentication) on a phone the device has no key for, or `0x0F` (Insufficient Encryption) on a phone it has a key for. The phone offers to pair, and after pairing the log shows `Encryption change: conn_handle=<n>, status=0`.
+Expect `hal_ble: BLE connected, conn_handle=<n>` and `MTU update: conn_handle=<n>, mtu=<n>`. Enabling notifications in step 3 fails with ATT error `0x05` (Insufficient Authentication) on a phone the device has no key for, or `0x0F` (Insufficient Encryption) on a phone it has a key for. The phone offers to pair, and after pairing the log shows `Encryption change: conn_handle=<n>, status=0` and one `Subscribe: conn_handle=<n> attr_handle=<n> notify:0->1` line for each characteristic you enabled. The write in step 4 then starts a scan.
 
 | Check | Expected | Status |
 |-------|----------|--------|
 | DEVICE_INFO without pairing | JSON with `name` (`TERMINAL-XXXX`), `deviceId`, `version` | [ ] |
 | Id before URL_SET | `deviceId` is the last two Bluetooth MAC bytes in hex | [ ] |
 | Write before pairing | ATT error `0x05` for a phone with no bond, `0x0F` for a phone with a bond the device kept | [ ] |
+| Notifications before pairing | Enabling notifications fails with the same ATT errors as a write | [ ] |
 | Pairing | Just Works, no passkey prompt | [ ] |
 | Write after pairing | Accepted | [ ] |
-| Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not valid JSON (<n> bytes)` | [ ] |
+| Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not one JSON value (<n> bytes)` | [ ] |
+| Bytes after the JSON | `{"deviceId":"SHOP"} x` to URL_SET fails with ATT error `0x13` and the same log line | [ ] |
+| NUL character | `{"deviceId":"SHOP\u0000X"}` to URL_SET fails with ATT error `0x13`, log `Write holds a NUL character` | [ ] |
+| Bad escape | `{"deviceId":"AB\uZZZZCD"}` to URL_SET fails with ATT error `0x13`, log `Write holds a \u escape without 4 hex digits` | [ ] |
+| Control byte | `{"deviceId":"SHOP"}` followed by the byte `0x01` to URL_SET fails with ATT error `0x13`, log `Write holds a control character` | [ ] |
 | Missing field | `{"x":1}` to URL_SET fails with ATT error `0x13` and `URL_SET needs a string deviceId` | [ ] |
-| No notifications | With notifications off on a characteristic, the write is accepted, no reply arrives, and the log shows `Client has not enabled notifications on this characteristic` | [ ] |
+| No notifications | With notifications off on a characteristic, the write fails with ATT error `0xFD`, and the log shows `Write refused: notifications are off on this characteristic` | [ ] |
+| Small MTU | With the default 23-byte MTU, a write fails with ATT error `0xFC`, and the log shows `Write refused: ATT MTU 23 is below 100` | [ ] |
 | Pairing failure | `Encryption failed, terminating connection` and a disconnect | [ ] |
 | Repeat pairing | Delete the bond on the phone only, reconnect, pair again. The device accepts it. | [ ] |
 
@@ -216,7 +223,8 @@ hal_ble: Sent WiFi scan results: <N> networks, 0 skipped
 | Security text | Only `OPEN`, `WPA2`, and `WPA3` appear. A mixed WPA/WPA2 network shows `WPA2`, and a mixed WPA2/WPA3 network shows `WPA3`. | [ ] |
 | Unjoinable networks | A WEP or WPA-only access point does not appear in the scan | [ ] |
 | Repeated request | A second write while a scan runs logs `Scan request ignored: a scan is already running` | [ ] |
-| Small MTU | Without an MTU request (23 bytes, so 20 per notification) every entry is skipped, and the terminator does not fit either. The log shows `Notification exceeds ATT MTU - 3 (20 bytes)`. With an MTU of 100 or more, every entry arrives. | [ ] |
+| Request from a second client | Client A starts a scan and disconnects at once; client B connects, enables notifications and writes WIFI_SCAN before A's scan ends. B gets `{"done":true,"count":0,"skipped":0}` at once, and the log shows `Scan request refused: a scan for another connection is running` | [ ] |
+| Small MTU | Without an MTU request (23 bytes) the scan write fails with ATT error `0xFC` and no scan runs. With an MTU of 100 or more, every entry that fits in MTU minus 3 bytes arrives, and `count` plus `skipped` equals the networks found. | [ ] |
 | Connected | A scan while the device is connected keeps the link up, and no `Attempting WiFi reconnect...` line follows the scan | [ ] |
 | Saved network out of range | A scan with a saved network that is out of range can log `Scan blocked by a connect attempt, retry <n> of 7`. The list still arrives. After the scan the log shows `Attempting WiFi reconnect...`, and the device connects without a reboot when the access point returns. | [ ] |
 | No saved network | A scan with no saved credentials is not followed by a reconnect line | [ ] |
@@ -261,7 +269,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | Notification | `{"success":true,"code":0,"message":"sdm_configured"}` | [ ] |
 | Stored id | The id is saved after the write succeeds. DEVICE_INFO now shows `TEST123` as `deviceId`. | [ ] |
 | Repeat on the same tag | The device releases the tag after a successful write. Write a second id right away and expect success again with a clean detect. This is not confirmed on hardware. | [ ] |
-| No notifications | With notifications off on URL_SET, the tag is still written, the LED and buzzer show success, and the log shows `Client has not enabled notifications on this characteristic` | [ ] |
+| No notifications | With notifications off on URL_SET, the write fails with ATT error `0xFD` and no tag write starts | [ ] |
 
 #### Failures
 
@@ -270,13 +278,18 @@ The offsets and the byte count are for the default base URL `https://example.com
 | Id `bad id!` | Notification code 1006 `invalid_device_id` at once, log `URL_SET rejected: invalid device id (<n> bytes)`, no tag needed | [ ] |
 | Empty id, or an id over 31 bytes | ATT error `0x0D` on the write, log `URL_SET deviceId has <n> bytes` | [ ] |
 | No tag on the antenna | After about 30 s, code 1005 `sdm_timeout`, with `Tag detection timed out after <n> attempts` and `SDM config: Overall timeout reached before attempt <n>`. The 15 s first window and 5 s retry windows add up to more than 30 s, so the time limit ends the run before 5 attempts finish and code 1001 is unlikely. | [ ] |
+| PN532 RX wire touching a noisy line | Code 1005 `sdm_timeout` or 1003 `pn532_unresponsive` no later than about 30 s after the request. The device stays responsive and the next request works once the wire is fixed. | [ ] |
 | A tag that is not an NTAG424 DNA | Code 1002 `unsupported_tag` after one attempt (for example an NTAG215) | [ ] |
 | A DESFire tag without the NDEF application | Code 1007 `unsupported_tag_capability` after one attempt | [ ] |
+| An ISO 14443-4 tag with the NDEF application that is not an NTAG 424 DNA, such as a DESFire EV2 (not run on hardware yet) | Code 1007 `unsupported_tag_capability` after one attempt, log `SDM config: tag reports vendor 0x04, type 0x<tt>, hardware version 0x<vv>; it is not an NTAG 424 DNA`, and the tag content is unchanged | [ ] |
+| An NTAG424 DNA whose file 02 change right is not key 0 | Code 1007 `unsupported_tag_capability` after one attempt, log `SDM config: file 02 has type 0, <n> bytes and change key <k>`, and the tag content is unchanged | [ ] |
 | PN532 TX wire unplugged after boot | Code 1003 `pn532_unresponsive` after several seconds, with `SDM config: PN532 unavailable after recovery` | [ ] |
 | Wire plugged in again, same request | Success without a reboot, because the firmware re-initializes the PN532. Not confirmed on hardware. | [ ] |
+| NVS full during a write | With the NVS partition full, a write to a good tag ends with code 1099 `tag_configured_id_not_saved`, log `Tag holds device id <id>, but saving it failed: <error>`, the error LED and sound, and DEVICE_INFO keeps the old id | [ ] |
 | Second URL_SET while one runs | At once, code 1099 `nfc_config_busy`, log `URL_SET rejected: nfc_config_busy` | [ ] |
 | WIFI_CONFIG during the write | Notification `{"success":false,"ip":"","msg":"WiFi connection failed"}`, log `WiFi config rejected: a tag write is running`, and the write goes on | [ ] |
 | Disconnect the BLE client during the write | The write still ends, log `URL_SET attempt #<n>: BLE disconnected before the result, not sent` | [ ] |
+| Disconnect and connect again during the write | Connect again, pair, and enable notifications on URL_SET before the write ends. No URL_SET result reaches the new connection, and the log shows the line of the row above. | [ ] |
 | Short press or 3 s hold during the write | Nothing changes. The state stays WRITING_TAG until the write ends. | [ ] |
 | Hold the button 10 s during the write | `Factory reset refused: a tag write is running` | [ ] |
 
@@ -310,6 +323,7 @@ The `BLE advertising stopped` line comes from the BLE host task, so it can appea
 | Empty `ssid` | ATT error `0x0D`, log `Invalid WiFi config: ssid 0 bytes, password <n> bytes` | [ ] |
 | `ssid` over 32 bytes or `password` over 64 bytes | ATT error `0x0D` | [ ] |
 | Missing `ssid`, or a `password` that is not a string | ATT error `0x13`, log `WiFi config needs a string ssid and, when present, a string password` | [ ] |
+| 64-byte password that is not hex | A failure notification at once, log `A 64-byte password must be 64 hex digits`, and the current connection stays up | [ ] |
 | Short press while connecting | Returns to IDLE and the connection continues. The LED pulses blue until the press, then blinks brown until the link is up. | [ ] |
 
 #### Wrong password
@@ -439,6 +453,8 @@ The monitor samples every 30 s. Raise or lower the supply to test the levels.
 | One low sample | A single reading below 3100 mV followed by a normal one does not put the device to sleep | [ ] |
 | Critical (below 3100 mV) | Two readings in a row, 30 s apart, give `hal_power: Battery level changed: <old> -> 0`, `Critical battery, entering deep sleep`, and `hal_power: Entering deep sleep`. BLE, WiFi, and SNTP stop first. Only a reset or a power cycle wakes the device. | [ ] |
 | Critical during a tag write | `Deep sleep postponed: a tag write is running`. The device sleeps after the write result. | [ ] |
+| Critical during a WiFi scan | `Deep sleep postponed: a scan is running`. The device sleeps after the scan terminator. | [ ] |
+| New request while the sleep waits | During a postponed sleep, a WIFI_SCAN gets the empty terminator, a URL_SET gets code 1099 `low_battery`, and a WIFI_CONFIG gets the failure notification, each with the log `<event> rejected in state <state>: low_battery` | [ ] |
 
 The level numbers in the log are 0 critical, 1 low, 2 medium, and 3 normal.
 

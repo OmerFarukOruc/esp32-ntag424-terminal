@@ -44,7 +44,7 @@ typedef enum {
  */
 typedef struct {
     char ssid[33];          /**< SSID, 1 to 32 bytes, NUL-terminated */
-    char password[65];      /**< Password, empty or 8 to 64 bytes (64 means a hex PSK), NUL-terminated */
+    char password[65];      /**< Password, empty or 8 to 64 bytes (64 bytes must be the PSK in hex digits), NUL-terminated */
 } hal_wifi_credentials_t;
 
 /**
@@ -73,6 +73,8 @@ esp_err_t hal_network_init(void);
 /**
  * @brief Deinitialize the network HAL
  *
+ * Do not call it while hal_wifi_scan() runs.
+ *
  * The registered callback stays registered for the next init.
  *
  * @return esp_err_t ESP_OK on success
@@ -88,7 +90,9 @@ esp_err_t hal_network_deinit(void);
  * with these credentials, 3 failed attempts whose reason means wrong
  * credentials or no matching access point end the retries (a few tens of
  * seconds). Any other failure reason, or a connection that worked before,
- * follows the 10 attempt rule (about 3 minutes). The credentials persist, so
+ * follows the 10 attempt rule (about 3 minutes). An attempt that joins the
+ * access point but gets no IP address within 30 s, or whose connect call
+ * fails at once, counts as failed. The credentials persist, so
  * the device reconnects after a reboot.
  *
  * Replaces any current connection. When this function fails after it stopped
@@ -98,7 +102,8 @@ esp_err_t hal_network_deinit(void);
  * @param[in] credentials Wi-Fi credentials
  * @return ESP_OK when the attempt started, ESP_ERR_INVALID_STATE before init,
  *         ESP_ERR_INVALID_ARG for a missing, empty, or unterminated SSID or
- *         password, or a password of 1 to 7 bytes, or the error of the failing Wi-Fi driver call (for example
+ *         password, a password of 1 to 7 bytes, or a 64-byte password with a
+ *         character that is not a hex digit, or the error of the failing Wi-Fi driver call (for example
  *         ESP_ERR_WIFI_PASSWORD)
  */
 esp_err_t hal_wifi_connect(const hal_wifi_credentials_t *credentials);

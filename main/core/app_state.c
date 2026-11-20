@@ -30,7 +30,7 @@
 static const char *TAG = "app_state";
 
 #define EVENT_QUEUE_SIZE            32
-#define EVENT_DATA_MAX              128
+#define EVENT_DATA_MAX              HAL_BLE_DEVICE_ID_MAX
 #define STATE_TASK_STACK            8192
 #define STATE_TASK_PRIORITY         5
 #define STATE_TASK_POLL_MS          5000
@@ -50,12 +50,11 @@ typedef enum {
 
 typedef struct {
     app_event_t event;
+    hal_ble_session_t session;  /* The BLE client of a request, HAL_BLE_SESSION_NONE for other events */
     size_t data_len;
     uint8_t data[EVENT_DATA_MAX];
 } event_msg_t;
 
-_Static_assert(EVENT_DATA_MAX >= sizeof(hal_ble_wifi_config_t), "event data must hold a WiFi config");
-_Static_assert(EVENT_DATA_MAX >= HAL_BLE_DEVICE_ID_MAX, "event data must hold a device id");
 _Static_assert(EVENT_DATA_MAX >= sizeof(hal_nfc_err_t), "event data must hold a tag write result");
 _Static_assert(APP_STATE_COUNT <= UINT8_MAX && APP_EVENT_COUNT <= UINT8_MAX,
                "hal_diagnostics stores states and events in one byte");
@@ -82,26 +81,29 @@ static const char *const s_event_names[APP_EVENT_COUNT] = {
     [APP_EVENT_WIFI_SCAN_REQUESTED] = "WIFI_SCAN_REQUESTED",
     [APP_EVENT_URL_SET] = "URL_SET",
     [APP_EVENT_URL_SET_DONE] = "URL_SET_DONE",
+    [APP_EVENT_WIFI_SCAN_DONE] = "WIFI_SCAN_DONE",
     [APP_EVENT_LOW_BATTERY] = "LOW_BATTERY",
     [APP_EVENT_CRITICAL_BATTERY] = "CRITICAL_BATTERY",
 };
 
 /* Only the state task reads or writes these. */
 static app_state_t s_state = APP_STATE_INIT;
-static bool s_critical_battery_pending;  /* The tag write refused a deep sleep */
+static bool s_critical_battery_pending;  /* A tag write or a scan postponed the deep sleep */
 static bool s_low_battery_pending;       /* The warning came outside IDLE */
+static hal_ble_session_t s_wifi_session = HAL_BLE_SESSION_NONE;  /* The client waiting for the WiFi result */
 
 static QueueHandle_t s_event_queue;
 static bool s_boot_fault;  /* Written before INIT_COMPLETE is queued, read by the state task after */
 static atomic_uint s_consecutive_overflows;
 static atomic_bool s_overflow_alarm;
 
-static esp_err_t post_event(app_event_t event, const void *data, size_t data_len, TickType_t wait)
+static esp_err_t post_event(app_event_t event, hal_ble_session_t session, const void *data, size_t data_len,
+                            TickType_t wait)
 {
     ESP_RETURN_ON_FALSE(s_event_queue != NULL, ESP_ERR_INVALID_STATE, TAG, "Event queue not created");
     ESP_RETURN_ON_FALSE(data_len <= EVENT_DATA_MAX, ESP_ERR_INVALID_SIZE, TAG, "Event data too large");
 
-    event_msg_t msg = {.event = event, .data_len = data_len};
+    event_msg_t msg = {.event = event, .session = session, .data_len = data_len};
     if (data_len > 0) {
         memcpy(msg.data, data, data_len);
     }
@@ -122,19 +124,68 @@ static esp_err_t post_event(app_event_t event, const void *data, size_t data_len
         ret = ESP_ERR_TIMEOUT;
     }
 
-    /* The data can hold WiFi credentials. */
-    explicit_bzero(&msg, sizeof(msg));
     return ret;
+}
+
+/* WiFi credentials skip the event queue, because a FreeRTOS queue keeps a copy of each item in its
+ * storage after xQueueReceive(). One slot holds the credentials until the state task takes them. */
+static struct {
+    portMUX_TYPE lock;
+    bool full;
+    hal_ble_wifi_config_t config;
+} s_wifi_slot = {.lock = portMUX_INITIALIZER_UNLOCKED};
+
+_Static_assert(sizeof(((hal_wifi_credentials_t *)0)->ssid) == sizeof(((hal_ble_wifi_config_t *)0)->ssid) &&
+               sizeof(((hal_wifi_credentials_t *)0)->password) == sizeof(((hal_ble_wifi_config_t *)0)->password),
+               "BLE and network credentials must have the same layout");
+
+static void wipe_wifi_slot(void)
+{
+    portENTER_CRITICAL(&s_wifi_slot.lock);
+    explicit_bzero(&s_wifi_slot.config, sizeof(s_wifi_slot.config));
+    s_wifi_slot.full = false;
+    portEXIT_CRITICAL(&s_wifi_slot.lock);
+}
+
+/** Moves the waiting credentials into creds and empties the slot. */
+static void take_wifi_credentials(hal_wifi_credentials_t *creds)
+{
+    portENTER_CRITICAL(&s_wifi_slot.lock);
+    memcpy(creds->ssid, s_wifi_slot.config.ssid, sizeof(creds->ssid));
+    memcpy(creds->password, s_wifi_slot.config.password, sizeof(creds->password));
+    explicit_bzero(&s_wifi_slot.config, sizeof(s_wifi_slot.config));
+    s_wifi_slot.full = false;
+    portEXIT_CRITICAL(&s_wifi_slot.lock);
+}
+
+static esp_err_t post_wifi_config(hal_ble_session_t session, const void *data, size_t data_len)
+{
+    ESP_RETURN_ON_FALSE(data_len == sizeof(hal_ble_wifi_config_t), ESP_ERR_INVALID_SIZE, TAG,
+                        "WiFi config of unexpected size %u", (unsigned)data_len);
+    portENTER_CRITICAL(&s_wifi_slot.lock);
+    bool busy = s_wifi_slot.full;
+    if (!busy) {
+        memcpy(&s_wifi_slot.config, data, data_len);
+        s_wifi_slot.full = true;
+    }
+    portEXIT_CRITICAL(&s_wifi_slot.lock);
+    ESP_RETURN_ON_FALSE(!busy, ESP_ERR_INVALID_STATE, TAG, "The previous WiFi config is still waiting");
+
+    esp_err_t err = post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, session, NULL, 0, 0);
+    if (err != ESP_OK) {
+        wipe_wifi_slot();
+    }
+    return err;
 }
 
 esp_err_t app_post_event(app_event_t event, const void *data, size_t data_len)
 {
-    return post_event(event, data, data_len, 0);
+    return post_event(event, HAL_BLE_SESSION_NONE, data, data_len, 0);
 }
 
 esp_err_t app_post_event_wait(app_event_t event, const void *data, size_t data_len)
 {
-    return post_event(event, data, data_len, portMAX_DELAY);
+    return post_event(event, HAL_BLE_SESSION_NONE, data, data_len, portMAX_DELAY);
 }
 
 static void button_callback(hal_button_event_t event, uint32_t hold_time_ms)
@@ -175,19 +226,18 @@ static void wifi_event_callback(hal_wifi_state_t state)
 }
 
 /* Runs on the NimBLE host task: it only queues the request for the state task. */
-static void ble_event_callback(hal_ble_event_t event, const void *data, size_t data_len)
+static esp_err_t ble_event_callback(hal_ble_event_t event, hal_ble_session_t session, const void *data,
+                                    size_t data_len)
 {
     switch (event) {
     case HAL_BLE_EVENT_WIFI_SCAN_REQ:
-        app_post_event(APP_EVENT_WIFI_SCAN_REQUESTED, NULL, 0);
-        break;
+        return post_event(APP_EVENT_WIFI_SCAN_REQUESTED, session, NULL, 0, 0);
     case HAL_BLE_EVENT_WIFI_CONFIG:
-        app_post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, data, data_len);
-        break;
+        return post_wifi_config(session, data, data_len);
     case HAL_BLE_EVENT_URL_SET:
-        app_post_event(APP_EVENT_URL_SET, data, data_len);
-        break;
+        return post_event(APP_EVENT_URL_SET, session, data, data_len, 0);
     }
+    return ESP_ERR_INVALID_ARG;
 }
 
 static void set_led(hal_led_pattern_t pattern)
@@ -309,9 +359,18 @@ static void factory_reset(void)
     esp_restart();
 }
 
-/* Critical battery: stop the radios and sleep. Only a reset wakes the device. */
-static void power_down(void)
+/* Critical battery: stop the radios and sleep. Only a reset wakes the device. A tag write or a scan
+ * still uses them, so the sleep waits for the task to report back. */
+static void power_down_when_idle(void)
 {
+    if (s_state == APP_STATE_WRITING_TAG || app_wifi_scan_running()) {
+        if (!s_critical_battery_pending) {
+            ESP_LOGW(TAG, "Deep sleep postponed: a %s is running",
+                     s_state == APP_STATE_WRITING_TAG ? "tag write" : "scan");
+        }
+        s_critical_battery_pending = true;
+        return;
+    }
     ESP_LOGW(TAG, "Critical battery, entering deep sleep");
     hal_time_stop_sync();
     hal_ble_deinit();
@@ -319,37 +378,24 @@ static void power_down(void)
     hal_power_deep_sleep();
 }
 
-static void send_wifi_result(bool success)
+static void send_wifi_result(hal_ble_session_t session, bool success)
 {
-    hal_ble_send_wifi_config_result(success, NULL, success ? "WiFi connected successfully" : "WiFi connection failed");
+    hal_ble_send_wifi_config_result(session, success, NULL,
+                                    success ? "WiFi connected successfully" : "WiFi connection failed");
 }
 
-static void handle_wifi_config(const void *data, size_t data_len)
+static void handle_wifi_config(hal_ble_session_t session, const hal_wifi_credentials_t *creds)
 {
-    if (data_len != sizeof(hal_ble_wifi_config_t)) {
-        ESP_LOGW(TAG, "WiFi config ignored: unexpected size %u", (unsigned)data_len);
-        return;
-    }
-
-    const hal_ble_wifi_config_t *config = data;
-    hal_wifi_credentials_t creds = {0};
-    _Static_assert(sizeof(creds.ssid) == sizeof(config->ssid) && sizeof(creds.password) == sizeof(config->password),
-                   "BLE and network credentials must have the same layout");
-    memcpy(creds.ssid, config->ssid, sizeof(creds.ssid));
-    memcpy(creds.password, config->password, sizeof(creds.password));
-
-    esp_err_t err = hal_wifi_connect(&creds);
-    explicit_bzero(&creds, sizeof(creds));
-
+    esp_err_t err = hal_wifi_connect(creds);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed to start: %s", esp_err_to_name(err));
-        send_wifi_result(false);
+        send_wifi_result(session, false);
         return;
     }
+    s_wifi_session = session;
     transition_to(APP_STATE_CONNECTING_WIFI, APP_EVENT_WIFI_CONFIG_RECEIVED);
 }
 
-/* The tag task reported. A deep sleep that came in during the write runs now. */
 static void finish_tag_write(const void *data)
 {
     hal_nfc_err_t nfc_err;
@@ -361,12 +407,9 @@ static void finish_tag_write(const void *data)
         set_led(success ? LED_PATTERN_SUCCESS : LED_PATTERN_NETWORK_ERROR);
         play(success ? BUZZER_SOUND_SUCCESS : BUZZER_SOUND_NETWORK_ERROR);
     }
-    if (s_critical_battery_pending) {
-        power_down();
-    }
 }
 
-static void handle_state_event(app_event_t event, const void *data, size_t data_len)
+static void handle_state_event(app_event_t event, hal_ble_session_t session, const void *data, size_t data_len)
 {
     switch (s_state) {
     case APP_STATE_INIT:
@@ -393,13 +436,13 @@ static void handle_state_event(app_event_t event, const void *data, size_t data_
             transition_to(APP_STATE_IDLE, event);
             break;
         case APP_EVENT_WIFI_CONFIG_RECEIVED:
-            handle_wifi_config(data, data_len);
+            handle_wifi_config(session, data);
             break;
         case APP_EVENT_WIFI_SCAN_REQUESTED:
-            app_wifi_scan_start();
+            app_wifi_scan_start(session);
             break;
         case APP_EVENT_URL_SET:
-            if (app_url_set_start(data, data_len)) {
+            if (app_url_set_start(session, data, data_len)) {
                 transition_to(APP_STATE_WRITING_TAG, event);
             }
             break;
@@ -412,14 +455,14 @@ static void handle_state_event(app_event_t event, const void *data, size_t data_
         /* The write ends with URL_SET_DONE. Buttons wait until then. */
         switch (event) {
         case APP_EVENT_URL_SET:
-            app_url_set_reject("nfc_config_busy");
+            app_url_set_reject(session, "nfc_config_busy");
             break;
         case APP_EVENT_WIFI_CONFIG_RECEIVED:
             ESP_LOGW(TAG, "WiFi config rejected: a tag write is running");
-            send_wifi_result(false);
+            send_wifi_result(session, false);
             break;
         case APP_EVENT_WIFI_SCAN_REQUESTED:
-            app_wifi_scan_start();
+            app_wifi_scan_start(session);
             break;
         default:
             break;
@@ -427,14 +470,14 @@ static void handle_state_event(app_event_t event, const void *data, size_t data_
         break;
 
     case APP_STATE_CONNECTING_WIFI:
-        if (event == APP_EVENT_WIFI_CONNECTED) {
-            send_wifi_result(true);
+        if (event == APP_EVENT_WIFI_CONNECTED && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED) {
+            send_wifi_result(s_wifi_session, true);
             transition_to(APP_STATE_IDLE, event);
         } else if (event == APP_EVENT_WIFI_DISCONNECTED) {
             /* An event queued before this connect attempt must not end it. */
             hal_wifi_state_t wifi_state = hal_wifi_get_state();
             if (wifi_state != HAL_WIFI_STATE_CONNECTING && wifi_state != HAL_WIFI_STATE_CONNECTED) {
-                send_wifi_result(false);
+                send_wifi_result(s_wifi_session, false);
                 transition_to(APP_STATE_IDLE, event);
             }
         } else if (event == APP_EVENT_BUTTON_SHORT) {
@@ -454,7 +497,19 @@ static void handle_state_event(app_event_t event, const void *data, size_t data_
     }
 }
 
-static void handle_event(const event_msg_t *msg)
+static const char *request_refusal(void)
+{
+    if (s_critical_battery_pending) {
+        return "low_battery";
+    }
+    /* A client can stay connected after onboarding ends, so answer instead of dropping. */
+    if (s_state != APP_STATE_ONBOARDING_BLE && s_state != APP_STATE_WRITING_TAG) {
+        return "not_onboarding";
+    }
+    return NULL;
+}
+
+static void dispatch_event(const event_msg_t *msg, const void *data, size_t data_len)
 {
     ESP_LOGD(TAG, "Event %s in state %s", s_event_names[msg->event], s_state_names[s_state]);
 
@@ -468,12 +523,7 @@ static void handle_event(const event_msg_t *msg)
         }
         return;
     case APP_EVENT_CRITICAL_BATTERY:
-        if (s_state == APP_STATE_WRITING_TAG) {
-            ESP_LOGW(TAG, "Deep sleep postponed: a tag write is running");
-            s_critical_battery_pending = true;
-        } else {
-            power_down();
-        }
+        power_down_when_idle();
         return;
     case APP_EVENT_LOW_BATTERY:
         if (s_state == APP_STATE_IDLE) {
@@ -485,31 +535,50 @@ static void handle_event(const event_msg_t *msg)
     case APP_EVENT_URL_SET_DONE:
         finish_tag_write(msg->data);
         return;
+    case APP_EVENT_WIFI_SCAN_DONE:
+        app_wifi_scan_done();
+        return;
     case APP_EVENT_WIFI_CONNECTED:
         ESP_ERROR_CHECK_WITHOUT_ABORT(hal_time_start_sync());
         break;
     case APP_EVENT_WIFI_CONFIG_RECEIVED:
     case APP_EVENT_URL_SET:
-    case APP_EVENT_WIFI_SCAN_REQUESTED:
-        /* A client can stay connected after onboarding ends, so answer instead of dropping. */
-        if (s_state != APP_STATE_ONBOARDING_BLE && s_state != APP_STATE_WRITING_TAG) {
-            ESP_LOGW(TAG, "%s rejected in state %s", s_event_names[msg->event], s_state_names[s_state]);
+    case APP_EVENT_WIFI_SCAN_REQUESTED: {
+        const char *refusal = request_refusal();
+        if (refusal != NULL) {
+            ESP_LOGW(TAG, "%s rejected in state %s: %s", s_event_names[msg->event], s_state_names[s_state], refusal);
             if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
-                send_wifi_result(false);
+                send_wifi_result(msg->session, false);
             } else if (msg->event == APP_EVENT_URL_SET) {
-                app_url_set_reject("not_onboarding");
+                app_url_set_reject(msg->session, refusal);
             } else {
                 /* An empty result still carries the done terminator the client waits for. */
-                hal_ble_send_wifi_scan_results(NULL, 0);
+                hal_ble_send_wifi_scan_results(msg->session, NULL, 0);
             }
             return;
         }
         break;
+    }
     default:
         break;
     }
 
-    handle_state_event(msg->event, msg->data, msg->data_len);
+    handle_state_event(msg->event, msg->session, data, data_len);
+}
+
+static void handle_event(const event_msg_t *msg)
+{
+    if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
+        hal_wifi_credentials_t creds = {0};
+        take_wifi_credentials(&creds);
+        dispatch_event(msg, &creds, sizeof(creds));
+        explicit_bzero(&creds, sizeof(creds));
+    } else {
+        dispatch_event(msg, msg->data, msg->data_len);
+    }
+    if (s_critical_battery_pending) {
+        power_down_when_idle();
+    }
 }
 
 static void state_machine_task(void *arg)
@@ -525,7 +594,6 @@ static void state_machine_task(void *arg)
     while (1) {
         if (xQueueReceive(s_event_queue, &msg, pdMS_TO_TICKS(STATE_TASK_POLL_MS)) == pdTRUE) {
             handle_event(&msg);
-            explicit_bzero(&msg, sizeof(msg));
 
             /* A tag write must end through URL_SET_DONE, so the alarm waits for it. */
             if (s_state != APP_STATE_WRITING_TAG && atomic_exchange(&s_overflow_alarm, false)) {
@@ -595,9 +663,9 @@ static esp_err_t init_ble(void)
 }
 
 #if CONFIG_HAL_POWER_BATTERY_MONITOR
-static void battery_callback(hal_battery_level_t level)
+static esp_err_t battery_callback(hal_battery_level_t level)
 {
-    app_post_event(level == HAL_BATTERY_CRITICAL ? APP_EVENT_CRITICAL_BATTERY : APP_EVENT_LOW_BATTERY, NULL, 0);
+    return app_post_event(level == HAL_BATTERY_CRITICAL ? APP_EVENT_CRITICAL_BATTERY : APP_EVENT_LOW_BATTERY, NULL, 0);
 }
 
 static esp_err_t init_power(void)

@@ -14,13 +14,10 @@
  */
 
 #include "hal_nfc_priv.h"
-#include "driver/uart.h"
 #include "esp_timer.h"
-#include "freertos/task.h"
 
 static const char *TAG = "hal_nfc";
 
-#define NFC_UART_NUM    ((uart_port_t)CONFIG_HAL_NFC_UART_NUM)
 /** PN532 library baud code for 115200 bps */
 #define PN532_BAUD_CODE 4
 /** PN532 port 3 output bits in use */
@@ -149,7 +146,7 @@ static bool soft_resync(void)
 
     for (int pass = 0; pass < 2; pass++) {
         send_wakeup();
-        vTaskDelay(pdMS_TO_TICKS(pass == 0 ? 40 : 80));
+        nfc_delay_ms(pass == 0 ? 40 : 80);
         if (ping()) {
             log_stage(pass == 0 ? "soft_resync_ok" : "soft_resync_ok_second_try");
             return true;
@@ -185,7 +182,7 @@ static bool reinit(void)
                 uart_driver_delete(NFC_UART_NUM);
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(pass == 0 ? 200 : 250));
+        nfc_delay_ms(pass == 0 ? 200 : 250);
         g_nfc.pn532 = nfc_reader_open();
     }
     if (g_nfc.pn532 == NULL) {
@@ -193,7 +190,7 @@ static bool reinit(void)
         return false;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    nfc_delay_ms(100);
     if (!ping()) {
         log_stage("reinit_ping_failed");
         pn532_end(g_nfc.pn532);
@@ -251,7 +248,7 @@ static bool detect_recover(detect_state_t *st, const char *why, uint32_t settle_
 
     st->mismatch_streak = 0;
     st->consec_errors = 0;
-    vTaskDelay(pdMS_TO_TICKS(settle_ms));
+    nfc_delay_ms(settle_ms);
     return true;
 }
 
@@ -286,7 +283,7 @@ hal_nfc_err_t nfc_reader_detect_tag(uint32_t timeout_ms)
         if (cards == 0) {
             st.consec_errors = 0;
             st.mismatch_streak = 0;
-            vTaskDelay(pdMS_TO_TICKS(DETECT_POLL_DELAY_MS));
+            nfc_delay_ms(DETECT_POLL_DELAY_MS);
             continue;
         }
 
@@ -303,9 +300,9 @@ hal_nfc_err_t nfc_reader_detect_tag(uint32_t timeout_ms)
                 }
             } else {
                 drain_pending();
-                vTaskDelay(pdMS_TO_TICKS(50));
+                nfc_delay_ms(50);
             }
-            vTaskDelay(pdMS_TO_TICKS(DETECT_POLL_DELAY_MS));
+            nfc_delay_ms(DETECT_POLL_DELAY_MS);
             continue;
         }
 
@@ -333,7 +330,7 @@ hal_nfc_err_t nfc_reader_detect_tag(uint32_t timeout_ms)
                 return HAL_NFC_ERR_PN532_UNRESPONSIVE;
             }
         } else {
-            vTaskDelay(pdMS_TO_TICKS(DETECT_POLL_DELAY_MS));
+            nfc_delay_ms(DETECT_POLL_DELAY_MS);
         }
     }
 

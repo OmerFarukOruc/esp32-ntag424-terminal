@@ -47,11 +47,14 @@ typedef struct {
 /**
  * @brief Low battery callback function type
  *
- * Runs on the battery monitor task.
+ * Runs on the battery monitor task and must not block. When it returns an
+ * error, or no callback is registered yet, the monitor offers the same level
+ * again at the next reading.
  *
  * @param level HAL_BATTERY_LOW or HAL_BATTERY_CRITICAL
+ * @return ESP_OK when the level was delivered
  */
-typedef void (*hal_low_battery_cb_t)(hal_battery_level_t level);
+typedef esp_err_t (*hal_low_battery_cb_t)(hal_battery_level_t level);
 
 /**
  * @brief Initialize the power HAL and start the battery monitor task

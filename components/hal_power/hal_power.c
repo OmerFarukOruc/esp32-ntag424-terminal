@@ -9,6 +9,7 @@
  * @brief Power HAL implementation with ADC battery monitoring
  */
 
+#include <stdatomic.h>
 #include "hal_power.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -41,7 +42,7 @@ static const char *TAG = "hal_power";
 static bool s_initialized = false;
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_cali_handle = NULL;
-static hal_low_battery_cb_t s_low_battery_callback = NULL;
+static _Atomic hal_low_battery_cb_t s_low_battery_callback;
 
 static esp_err_t read_battery_voltage_mv(uint16_t *battery_mv)
 {
@@ -120,11 +121,17 @@ static void battery_monitor_task(void *arg)
             continue;
         }
 
+        if (state.level == HAL_BATTERY_LOW || state.level == HAL_BATTERY_CRITICAL) {
+            hal_low_battery_cb_t callback = atomic_load(&s_low_battery_callback);
+            esp_err_t err = callback != NULL ? callback(state.level) : ESP_ERR_INVALID_STATE;
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Battery level %d not delivered (%s), trying again at the next reading", state.level,
+                         esp_err_to_name(err));
+                continue;
+            }
+        }
         ESP_LOGI(TAG, "Battery level changed: %d -> %d", reported, state.level);
         reported = state.level;
-        if (s_low_battery_callback && (state.level == HAL_BATTERY_LOW || state.level == HAL_BATTERY_CRITICAL)) {
-            s_low_battery_callback(state.level);
-        }
     }
 }
 
@@ -189,7 +196,7 @@ esp_err_t hal_power_get_state(hal_power_state_t *state)
 
 void hal_power_register_low_battery_cb(hal_low_battery_cb_t callback)
 {
-    s_low_battery_callback = callback;
+    atomic_store(&s_low_battery_callback, callback);
 }
 
 void hal_power_deep_sleep(void)

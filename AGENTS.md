@@ -21,7 +21,7 @@ Hardware behaviour cannot be checked in CI. Mark a claim about the PN532, the ta
 
 - `main/core/` holds the state machine. `app_state_priv.h` is the interface between its files.
 - `components/hal_*/` are the hardware layers. The header in `include/` owns the contract of each one, and `hal_ble.h` owns the BLE wire format. Change the header and the doc in the same commit.
-- `components/pn532_driver/` builds `libs/ESP32-PN532` as a component. The library is a GPL-3.0 submodule. Leave it unmodified.
+- `components/pn532_driver/` builds `libs/ESP32-PN532` as a component. The library is a GPL-3.0 submodule. Leave it unmodified. The component links the library's `uart_read_bytes()` calls through `pn532_io_deadline.c`, which ends every PN532 read at the deadline the HAL sets, because the library restarts its timeout on each byte it reads.
 - Each component declares its options in its own `Kconfig`, shown in menuconfig under **Component config**. Project defaults live in `sdkconfig.defaults`, and the flash layout in `partitions.csv`.
 - Keep every source file under 1000 lines so a reviewer can read it whole. Split by responsibility, as `hal_nfc` is split into reader, AES, DESFire, and SDM files.
 
@@ -30,9 +30,9 @@ Hardware behaviour cannot be checked in CI. Mark a claim about the PN532, the ta
 - Check errors with `esp_check.h`: `ESP_RETURN_ON_ERROR`, `ESP_RETURN_ON_FALSE`, and `ESP_GOTO_ON_ERROR` with a `TAG`. Return an `esp_err_t` and let the caller decide.
 - List only the components a file uses in `PRIV_REQUIRES`. Since v6.0 the umbrella `driver` component no longer re-exports `esp_driver_uart` and `esp_driver_gpio`, so name them.
 - The NimBLE host task, the system event task, `esp_timer` callbacks, the battery monitor, and the button task must return quickly. Do not wait on a queue, take a mutex, or sleep in them.
-- A callback only posts to the state task queue with `app_post_event()`, which does not wait. The state task owns the state, the LED pattern, and the WIFI_CONFIG and URL_SET replies. Slow work runs in its own task. The tag write task reports back with `APP_EVENT_URL_SET_DONE`, which it posts with `app_post_event_wait()`. The WiFi scan task sends its BLE notifications itself.
+- A callback only posts to the state task queue with `app_post_event()`, which does not wait. The state task owns the state, the LED pattern, and the WIFI_CONFIG and URL_SET replies. Slow work runs in its own task. The tag write task reports back with `APP_EVENT_URL_SET_DONE`, which it posts with `app_post_event_wait()`. The WiFi scan task sends its BLE notifications itself and then reports with `APP_EVENT_WIFI_SCAN_DONE`. The state task stops the radios only while neither task runs.
 - The task watchdog is 10 s with panic on, and it watches the idle tasks on both cores. No loop or wait may keep a task off the CPU near 10 s. The state task subscribes to the watchdog and resets it in its loop.
-- Wipe credentials with `explicit_bzero()` as soon as the last reader is done. WiFi credentials pass through BLE writes, the event queue, and the connect call.
+- Wipe credentials with `explicit_bzero()` as soon as the last reader is done. WiFi credentials pass through BLE writes, the WiFi config slot in `main/core/app_state.c`, and the connect call. Keep them out of FreeRTOS queues, because a queue keeps a copy of each item in its storage after `xQueueReceive()`.
 - Log with the file's `TAG` at a level that fits. DEBUG strings are not compiled in at the default level.
 
 ## PN532 and tag learnings

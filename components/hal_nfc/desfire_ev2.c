@@ -15,6 +15,7 @@
 #include <string.h>
 #include "hal_nfc_priv.h"
 #include "esp_random.h"
+#include "mbedtls/constant_time.h"
 
 static const char *TAG = "hal_nfc";
 
@@ -22,6 +23,8 @@ static const char *TAG = "hal_nfc";
 #define DESFIRE_INS_AUTH_EV2_FIRST          0x71
 #define DESFIRE_INS_ADDITIONAL_FRAME        0xAF
 #define DESFIRE_INS_CHANGE_FILE_SETTINGS    0x5F
+#define DESFIRE_INS_GET_FILE_SETTINGS       0xF5
+#define DESFIRE_INS_GET_VERSION             0x60
 #define DESFIRE_INS_WRITE_DATA              0x8D
 
 /* DESFire status byte (SW2 after SW1 = 0x91) */
@@ -57,6 +60,7 @@ void nfc_ev2_session_reset(void)
 static hal_nfc_err_t apdu_exchange(uint8_t buf[NFC_APDU_BUF_SIZE], size_t apdu_len, size_t *rx_len)
 {
     ESP_RETURN_ON_FALSE(g_nfc.pn532 != NULL, HAL_NFC_ERR_NOT_INIT, TAG, "PN532 not initialized");
+    ESP_RETURN_ON_FALSE(!nfc_deadline_passed(), HAL_NFC_ERR_SDM_TIMEOUT, TAG, "Timeout reached, no APDU sent");
 
     const char *errstr = NULL;
     int result = pn532_dx(g_nfc.pn532, apdu_len, buf, NFC_APDU_BUF_SIZE, &errstr);
@@ -201,7 +205,7 @@ hal_nfc_err_t nfc_ev2_authenticate(uint8_t key_no, const uint8_t key[16])
     hal_nfc_err_t ret = HAL_NFC_OK;
     hal_nfc_err_t err;
 
-    s_session.authenticated = false;
+    nfc_ev2_session_reset();
 
     /* Part 1: KeyNo, LenCap = 0; the tag answers with the encrypted RndB */
     const uint8_t part1[2] = { key_no, 0x00 };
@@ -256,6 +260,30 @@ out:
     return ret;
 }
 
+hal_nfc_err_t nfc_ev2_get_version(uint8_t hw_version[NFC_VERSION_HW_LEN])
+{
+    uint8_t part[NFC_VERSION_PART_MAX_LEN];
+    size_t len = sizeof(part);
+    hal_nfc_err_t err = desfire_send_cmd(DESFIRE_INS_GET_VERSION, NULL, 0, DESFIRE_STATUS_MORE, part, &len);
+    ESP_RETURN_ON_FALSE(err == HAL_NFC_OK, err, TAG, "GetVersion failed (%d)", err);
+    ESP_RETURN_ON_FALSE(len == NFC_VERSION_HW_LEN, HAL_NFC_ERR_COMM, TAG,
+                        "GetVersion hardware part of %u bytes", (unsigned)len);
+    memcpy(hw_version, part, NFC_VERSION_HW_LEN);
+
+    len = sizeof(part);
+    err = desfire_send_cmd(DESFIRE_INS_ADDITIONAL_FRAME, NULL, 0, DESFIRE_STATUS_MORE, part, &len);
+    if (err == HAL_NFC_OK) {
+        len = sizeof(part);
+        err = desfire_send_cmd(DESFIRE_INS_ADDITIONAL_FRAME, NULL, 0, DESFIRE_STATUS_OK, part, &len);
+    }
+    return err;
+}
+
+hal_nfc_err_t nfc_ev2_get_file_settings(uint8_t file_no, uint8_t *settings, size_t *len)
+{
+    return desfire_send_cmd(DESFIRE_INS_GET_FILE_SETTINGS, &file_no, 1, DESFIRE_STATUS_OK, settings, len);
+}
+
 hal_nfc_err_t nfc_ev2_write_file(uint8_t file_no, const uint8_t *data, size_t len)
 {
     ESP_RETURN_ON_FALSE(s_session.authenticated, HAL_NFC_ERR_AUTH, TAG, "No authenticated session");
@@ -288,25 +316,44 @@ static void cmac_truncate(const uint8_t full_mac[AES_BLOCK_LEN], uint8_t short_m
     }
 }
 
-/**
- * The response MAC is not verified: the tag state is read from the status
- * bytes alone and the command counter advances on status OK.
- */
+static void put_le16(uint8_t out[2], uint16_t value)
+{
+    out[0] = value & 0xFF;
+    out[1] = value >> 8;
+}
+
+/** Checks the MAC the tag sends after a CommMode.Full command without response data */
+static hal_nfc_err_t verify_response_mac(const uint8_t response[CMD_MAC_LEN])
+{
+    /* MAC input: RC 00 || CmdCtr + 1 LE || TI */
+    uint8_t mac_input[7] = {DESFIRE_STATUS_OK};
+    put_le16(&mac_input[1], s_session.cmd_ctr + 1);
+    memcpy(&mac_input[3], s_session.ti, 4);
+    uint8_t full_mac[AES_BLOCK_LEN];
+    uint8_t expected[CMD_MAC_LEN];
+    ESP_RETURN_ON_FALSE(nfc_aes_cmac(s_session.ses_auth_mac_key, mac_input, sizeof(mac_input), full_mac) == ESP_OK,
+                        HAL_NFC_ERR_COMM, TAG, "Response MAC failed");
+    cmac_truncate(full_mac, expected);
+    ESP_RETURN_ON_FALSE(mbedtls_ct_memcmp(expected, response, CMD_MAC_LEN) == 0, HAL_NFC_ERR_COMM, TAG, "Tag response MAC does not match");
+    return HAL_NFC_OK;
+}
+
+/** The tag must answer with a valid response MAC; any failure ends the session. */
 hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *settings, size_t len)
 {
-    ESP_RETURN_ON_FALSE(s_session.authenticated, HAL_NFC_ERR_AUTH, TAG, "No authenticated session");
-    ESP_RETURN_ON_FALSE(len <= CFS_MAX_SETTINGS_LEN, HAL_NFC_ERR_COMM, TAG,
-                        "ChangeFileSettings block of %u bytes does not fit", (unsigned)len);
+    hal_nfc_err_t ret = HAL_NFC_OK;
+    ESP_GOTO_ON_FALSE(s_session.authenticated, HAL_NFC_ERR_AUTH, fail, TAG, "No authenticated session");
+    ESP_GOTO_ON_FALSE(len <= CFS_MAX_SETTINGS_LEN, HAL_NFC_ERR_COMM, fail, TAG,
+                      "ChangeFileSettings block of %u bytes does not fit", (unsigned)len);
 
     /* IV = AES-ECB(KSesAuthENC, A5 5A || TI || CmdCtr LE || 00 x 8); one block, so CBC with IV 0 is ECB */
     uint8_t iv_input[AES_BLOCK_LEN] = {0xA5, 0x5A};
     uint8_t cmd_iv[AES_BLOCK_LEN];
     memcpy(&iv_input[2], s_session.ti, 4);
-    iv_input[6] = s_session.cmd_ctr & 0xFF;
-    iv_input[7] = (s_session.cmd_ctr >> 8) & 0xFF;
-    ESP_RETURN_ON_FALSE(nfc_aes_cbc_encrypt(s_session.ses_auth_enc_key, IV_ZERO, iv_input, sizeof(iv_input),
-                                            cmd_iv) == ESP_OK,
-                        HAL_NFC_ERR_COMM, TAG, "Command IV derivation failed");
+    put_le16(&iv_input[6], s_session.cmd_ctr);
+    ESP_GOTO_ON_FALSE(nfc_aes_cbc_encrypt(s_session.ses_auth_enc_key, IV_ZERO, iv_input, sizeof(iv_input),
+                                          cmd_iv) == ESP_OK,
+                      HAL_NFC_ERR_COMM, fail, TAG, "Command IV derivation failed");
 
     /* Pad with 0x80 00.. to a block multiple */
     size_t padded_len = ((len / AES_BLOCK_LEN) + 1) * AES_BLOCK_LEN;
@@ -319,29 +366,41 @@ hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *setti
     cmd_data[0] = file_no;
     esp_err_t crypt = nfc_aes_cbc_encrypt(s_session.ses_auth_enc_key, cmd_iv, padded, padded_len, &cmd_data[1]);
     explicit_bzero(padded, sizeof(padded));
-    ESP_RETURN_ON_FALSE(crypt == ESP_OK, HAL_NFC_ERR_COMM, TAG, "Command encryption failed");
+    ESP_GOTO_ON_FALSE(crypt == ESP_OK, HAL_NFC_ERR_COMM, fail, TAG, "Command encryption failed");
 
     /* MAC input: Cmd || CmdCtr LE || TI || CmdHeader || EncryptedData */
     uint8_t mac_input[7 + 1 + CFS_MAX_PADDED_LEN];
     size_t mac_input_len = 0;
     mac_input[mac_input_len++] = DESFIRE_INS_CHANGE_FILE_SETTINGS;
-    mac_input[mac_input_len++] = s_session.cmd_ctr & 0xFF;
-    mac_input[mac_input_len++] = (s_session.cmd_ctr >> 8) & 0xFF;
+    put_le16(&mac_input[mac_input_len], s_session.cmd_ctr);
+    mac_input_len += 2;
     memcpy(&mac_input[mac_input_len], s_session.ti, 4);
     mac_input_len += 4;
     memcpy(&mac_input[mac_input_len], cmd_data, 1 + padded_len);
     mac_input_len += 1 + padded_len;
 
     uint8_t full_mac[AES_BLOCK_LEN];
-    ESP_RETURN_ON_FALSE(nfc_aes_cmac(s_session.ses_auth_mac_key, mac_input, mac_input_len,
-                                     full_mac) == ESP_OK,
-                        HAL_NFC_ERR_COMM, TAG, "Command MAC failed");
+    ESP_GOTO_ON_FALSE(nfc_aes_cmac(s_session.ses_auth_mac_key, mac_input, mac_input_len, full_mac) == ESP_OK,
+                      HAL_NFC_ERR_COMM, fail, TAG, "Command MAC failed");
     cmac_truncate(full_mac, &cmd_data[1 + padded_len]);
 
-    hal_nfc_err_t err = desfire_send_cmd(DESFIRE_INS_CHANGE_FILE_SETTINGS, cmd_data,
-                                         1 + padded_len + CMD_MAC_LEN, DESFIRE_STATUS_OK, NULL, NULL);
-    if (err == HAL_NFC_OK) {
-        s_session.cmd_ctr++;
+    uint8_t response[CMD_MAC_LEN];
+    size_t resp_len = sizeof(response);
+    ret = desfire_send_cmd(DESFIRE_INS_CHANGE_FILE_SETTINGS, cmd_data, 1 + padded_len + CMD_MAC_LEN,
+                           DESFIRE_STATUS_OK, response, &resp_len);
+    if (ret != HAL_NFC_OK) {
+        goto fail;
     }
-    return err;
+    ESP_GOTO_ON_FALSE(resp_len == CMD_MAC_LEN, HAL_NFC_ERR_COMM, fail, TAG,
+                      "ChangeFileSettings: expected an 8 byte response MAC, got %u bytes", (unsigned)resp_len);
+    ret = verify_response_mac(response);
+    if (ret != HAL_NFC_OK) {
+        goto fail;
+    }
+    s_session.cmd_ctr++;
+    return HAL_NFC_OK;
+
+fail:
+    nfc_ev2_session_reset();
+    return ret;
 }

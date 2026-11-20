@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -23,6 +24,8 @@
 #include "hal_nfc.h"
 #include "pn532.h"
 #include "sdkconfig.h"
+
+#define NFC_UART_NUM                ((uart_port_t)CONFIG_HAL_NFC_UART_NUM)
 
 /** Largest ISO 7816 APDU the HAL builds or receives, including SW1 SW2 */
 #define NFC_APDU_BUF_SIZE           256
@@ -36,9 +39,23 @@
 typedef struct {
     pn532_t *pn532;             /**< Reader handle, NULL after a failed re-init */
     SemaphoreHandle_t mutex;    /**< Serializes every PN532 conversation; NULL before init */
+    int64_t deadline_us;        /**< esp_timer time the running entry point must finish by */
 } nfc_ctx_t;
 
 extern nfc_ctx_t g_nfc;
+
+/* hal_nfc.c: the deadline of the running entry point. Callers hold g_nfc.mutex. */
+
+bool nfc_deadline_passed(void);
+
+/** Milliseconds left before the deadline, 0 once it passed */
+int64_t nfc_deadline_left_ms(void);
+
+/** vTaskDelay() that ends at the deadline */
+void nfc_delay_ms(uint32_t ms);
+
+/** Let PN532 reads run a short time past the deadline, to release the tag */
+void nfc_deadline_allow_cleanup(void);
 
 /* nfc_reader.c: PN532 link recovery and tag detection. Callers hold g_nfc.mutex. */
 
@@ -78,16 +95,31 @@ esp_err_t nfc_aes_cmac(const uint8_t key[16], const uint8_t *data, size_t len, u
 
 /* desfire_ev2.c: ISO 7816 select and DESFire EV2 secure messaging */
 
+/* Every APDU below returns HAL_NFC_ERR_SDM_TIMEOUT without sending once the deadline has passed. */
+
 /** ISO SELECT of the NDEF application by DF name */
 hal_nfc_err_t nfc_select_ndef_app(void);
 
 /** AuthenticateEV2First with an AES-128 key; fills the session on success */
 hal_nfc_err_t nfc_ev2_authenticate(uint8_t key_no, const uint8_t key[16]);
 
+/** GetVersion hardware part: VendorID, HWType, HWSubType, HWMajorVersion, HWMinorVersion, HWStorageSize,
+ * HWProtocol (NT4H2421Gx datasheet, GetVersion) */
+#define NFC_VERSION_HW_LEN          7
+/** The production part, the longest of the three GetVersion answers, is 14 bytes; room is left for more */
+#define NFC_VERSION_PART_MAX_LEN    16
+
+/** GetVersion before authentication; reads all three parts and returns the hardware part */
+hal_nfc_err_t nfc_ev2_get_version(uint8_t hw_version[NFC_VERSION_HW_LEN]);
+
+/** GetFileSettings before authentication; *len is the buffer size in and the answer length out */
+hal_nfc_err_t nfc_ev2_get_file_settings(uint8_t file_no, uint8_t *settings, size_t *len);
+
 /** WriteData (plain comm mode) of len <= NFC_MAX_NDEF_LEN bytes at offset 0 */
 hal_nfc_err_t nfc_ev2_write_file(uint8_t file_no, const uint8_t *data, size_t len);
 
-/** ChangeFileSettings in CommMode.Full; len is at most 31 bytes */
+/** ChangeFileSettings in CommMode.Full; len is at most 31 bytes. OK only when the tag's response MAC
+ * matches; any failure forgets the session keys. */
 hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *settings, size_t len);
 
 /** Forget the session keys */
@@ -95,7 +127,7 @@ void nfc_ev2_session_reset(void);
 
 /* ntag424_sdm.c */
 
-/** Run the SDM configuration; the caller holds g_nfc.mutex */
-hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id, uint32_t timeout_ms);
+/** Run the SDM configuration by g_nfc.deadline_us; the caller holds g_nfc.mutex */
+hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id);
 
 #endif /* HAL_NFC_PRIV_H */

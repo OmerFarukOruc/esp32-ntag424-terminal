@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -20,7 +20,8 @@ static const char *TAG = "app_wifi_scan";
 #define SCAN_TASK_STACK     5120
 #define SCAN_TASK_PRIORITY  5
 
-static atomic_bool s_scanning;
+static bool s_scanning;
+static hal_ble_session_t s_scan_session;
 
 /* The security names the phone client parses. */
 static const char *const s_security_names[] = {
@@ -31,7 +32,7 @@ static const char *const s_security_names[] = {
 
 static void wifi_scan_task(void *arg)
 {
-    (void)arg;
+    hal_ble_session_t session = (hal_ble_session_t)(uintptr_t)arg;
     hal_wifi_ap_t aps[HAL_WIFI_SCAN_MAX];
     hal_ble_wifi_scan_result_t results[HAL_WIFI_SCAN_MAX];
     uint16_t count = 0;
@@ -53,25 +54,44 @@ static void wifi_scan_task(void *arg)
 
     /* A failed scan reports an empty result, so the client does not wait for it. */
     ESP_LOGI(TAG, "Scan complete, found %u networks", (unsigned)count);
-    err = hal_ble_send_wifi_scan_results(results, count);
+    err = hal_ble_send_wifi_scan_results(session, results, count);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send scan results: %s", esp_err_to_name(err));
     }
 
-    atomic_store(&s_scanning, false);
+    /* The state task waits for this event before it stops the radio, so it waits for a queue slot too. */
+    ESP_ERROR_CHECK_WITHOUT_ABORT(app_post_event_wait(APP_EVENT_WIFI_SCAN_DONE, NULL, 0));
     vTaskDelete(NULL);
 }
 
-void app_wifi_scan_start(void)
+bool app_wifi_scan_running(void)
 {
-    if (atomic_exchange(&s_scanning, true)) {
-        ESP_LOGW(TAG, "Scan request ignored: a scan is already running");
+    return s_scanning;
+}
+
+void app_wifi_scan_done(void)
+{
+    s_scanning = false;
+}
+
+void app_wifi_scan_start(hal_ble_session_t session)
+{
+    if (s_scanning) {
+        if (session == s_scan_session) {
+            ESP_LOGW(TAG, "Scan request ignored: a scan is already running");
+        } else {
+            ESP_LOGW(TAG, "Scan request refused: a scan for another connection is running");
+            hal_ble_send_wifi_scan_results(session, NULL, 0);
+        }
         return;
     }
+    s_scanning = true;
+    s_scan_session = session;
 
-    if (xTaskCreate(wifi_scan_task, "wifi_scan", SCAN_TASK_STACK, NULL, SCAN_TASK_PRIORITY, NULL) != pdPASS) {
+    if (xTaskCreate(wifi_scan_task, "wifi_scan", SCAN_TASK_STACK, (void *)(uintptr_t)session, SCAN_TASK_PRIORITY,
+                    NULL) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create the scan task");
-        atomic_store(&s_scanning, false);
-        hal_ble_send_wifi_scan_results(NULL, 0);
+        s_scanning = false;
+        hal_ble_send_wifi_scan_results(session, NULL, 0);
     }
 }

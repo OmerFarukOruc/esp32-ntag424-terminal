@@ -12,7 +12,13 @@ if(NOT EXISTS "${PN532_LIB_DIR}/pn532.c")
 endif()
 
 idf_component_register(
-    SRCS "${PN532_LIB_DIR}/pn532.c"
-    INCLUDE_DIRS "${PN532_LIB_DIR}/include"
-    PRIV_REQUIRES esp_driver_uart esp_driver_gpio
+    SRCS "${PN532_LIB_DIR}/pn532.c" "pn532_io_deadline.c"
+    INCLUDE_DIRS "${PN532_LIB_DIR}/include" "include"
+    REQUIRES esp_driver_uart
+    PRIV_REQUIRES esp_driver_gpio esp_timer
 )
+
+# pn532_io_deadline.c bounds the library's UART reads without changing the submodule. See
+# "Wrappers to redefine or extend existing functions" in the ESP-IDF v6.1 build system guide:
+# https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-guides/build-system.html
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=uart_read_bytes")

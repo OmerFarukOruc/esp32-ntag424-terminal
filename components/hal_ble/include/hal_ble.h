@@ -23,7 +23,8 @@
  * | 0004   | WIFI_CONFIG | write, notify | {"ssid":"..","password":".."}     |
  * | 0006   | URL_SET     | write, notify | {"deviceId":".."}                 |
  *
- * Security: the three write characteristics require an encrypted link. The
+ * Security: the three write characteristics, and their notification
+ * switches (CCCD), require an encrypted link. The
  * device pairs with LE Secure Connections, Just Works (no passkey, no MITM
  * protection) and stores the bond. A write on an unencrypted link fails with
  * ATT error 0x05 (Insufficient Authentication) when the peer has no stored
@@ -32,20 +33,27 @@
  * errors reach the client. DEVICE_INFO is readable without pairing.
  *
  * The client must enable notifications (CCCD) on a characteristic before it
- * writes to it. A send on a characteristic without notifications enabled
- * fails with ESP_ERR_INVALID_STATE. The client must request an ATT MTU of at least 100 bytes. The device
- * cannot start the MTU exchange itself, because the NimBLE GATT client needs
- * the central role, which this firmware turns off. With the default 23-byte MTU
- * every scan entry is skipped.
+ * writes to it, and a write without them fails with ATT error 0xFD (Client
+ * Characteristic Configuration Descriptor Improperly Configured). A send on a
+ * characteristic whose notifications the client turned off later fails with
+ * ESP_ERR_INVALID_STATE. The client must request an ATT MTU of at least 100
+ * bytes, and a write on a link with a smaller MTU fails with ATT error 0xFC
+ * (Write Request Rejected). The device cannot start the MTU exchange itself,
+ * because the NimBLE GATT client needs the central role, which this firmware
+ * turns off. A write the application cannot queue fails with ATT error 0x11
+ * (Insufficient Resources). An acknowledged write gets its reply, except a
+ * repeated WIFI_SCAN from the same session while its scan runs and a
+ * WIFI_CONFIG whose connect attempt a short press ends.
  *
  * Writes are limited to 200 bytes. A write that is empty or over that limit
  * fails with ATT error 0x0D (Invalid Attribute Value Length). So does a
  * WIFI_CONFIG with an empty SSID, an SSID over 32 bytes or a password over 64
  * bytes, and a URL_SET with an empty deviceId or one over 31 bytes. A write
- * that is not valid JSON, or lacks a string "ssid" (WIFI_CONFIG) or
- * "deviceId" (URL_SET), or has a "password" that is not a string, fails with
- * ATT error 0x13 (Value Not Allowed). A WIFI_CONFIG without "password"
- * selects an open network.
+ * that is not one JSON value with only whitespace after it, holds a NUL
+ * character (raw or as the escape \u0000), lacks a string "ssid"
+ * (WIFI_CONFIG) or "deviceId" (URL_SET), or has a "password" that is not a
+ * string, fails with ATT error 0x13 (Value Not Allowed). A WIFI_CONFIG
+ * without "password" selects an open network.
  *
  * The advertised name is "TERMINAL-XXXX" with the last two Bluetooth MAC bytes
  * in hex, for example "TERMINAL-84F2". The advertising interval is 100 ms.
@@ -58,9 +66,10 @@
  * - WIFI_SCAN: one notification per network, each one JSON object
  *   {"ssid":"..","rssi":-52,"sec":"WPA2","ch":6}, then a terminator
  *   {"done":true,"count":N,"skipped":M}. "count" is the number of network
- *   notifications sent and "skipped" the number that did not fit in
- *   ATT MTU - 3 bytes. An empty scan sends only the terminator
- *   with count 0. The client treats the scan as complete on "done".
+ *   notifications sent and "skipped" the number not sent, because their
+ *   JSON did not fit in ATT MTU - 3 bytes or a send failed. count + skipped
+ *   is the number of networks found. An empty scan sends only the
+ *   terminator with count 0. The client treats the scan as complete on "done".
  * - WIFI_CONFIG: {"success":bool,"ip":"..","msg":".."} after the connect
  *   attempt.
  * - URL_SET: {"success":bool,"code":int,"message":".."} after the SDM
@@ -81,6 +90,19 @@ extern "C" {
 
 /** Buffer size for a device id, including the terminating NUL. */
 #define HAL_BLE_DEVICE_ID_MAX 32
+
+/**
+ * @brief One BLE connection
+ *
+ * Every request carries the session of the connection that sent it. A reply
+ * sent with that session reaches only that connection, never a client that
+ * connected later. The device checks the session right before each send, so
+ * only a reconnect within those few instructions could still receive it.
+ */
+typedef uint32_t hal_ble_session_t;
+
+/** No connection */
+#define HAL_BLE_SESSION_NONE UINT32_MAX
 
 /**
  * @brief BLE events delivered to the event callback
@@ -118,10 +140,14 @@ typedef struct {
  * returns, so copy what you need.
  *
  * @param event The BLE event that occurred
+ * @param session The connection that sent the request; pass it to the reply
  * @param data Event-specific data (see hal_ble_event_t), NULL if not applicable
  * @param data_len Length of event data in bytes
+ * @return ESP_OK when the application took the request and will reply. Any
+ *         other value fails the write with ATT error 0x11.
  */
-typedef void (*hal_ble_event_cb_t)(hal_ble_event_t event, const void *data, size_t data_len);
+typedef esp_err_t (*hal_ble_event_cb_t)(hal_ble_event_t event, hal_ble_session_t session, const void *data,
+                                        size_t data_len);
 
 /**
  * @brief Initialize the BLE subsystem
@@ -182,54 +208,63 @@ esp_err_t hal_ble_stop_advertising(void);
 esp_err_t hal_ble_disconnect(void);
 
 /**
- * @brief Check if a client is connected
+ * @brief Check whether the connection of a session is still up
  *
- * @return true if connected, false otherwise
+ * @param session Session from the event callback
+ * @return true while that connection lasts, false after it ended
  */
-bool hal_ble_is_connected(void);
+bool hal_ble_session_is_current(hal_ble_session_t session);
 
 /**
- * @brief Send WiFi scan results to the connected client
+ * @brief Send WiFi scan results to the client that asked for them
  *
  * Sends one WIFI_SCAN notification per network and a final terminator (see
  * the notification formats above). Do not call from the event callback.
  *
+ * @param session Session of the WIFI_SCAN request
  * @param results Array of scan results, may be NULL when count is 0
  * @param count Number of results in array, 0 reports an empty scan
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE without a connection or
- *         without notifications enabled, ESP_ERR_INVALID_SIZE when the MTU is
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone or
+ *         has notifications off, ESP_ERR_INVALID_SIZE when the MTU is
  *         too small for the terminator, the first send error otherwise. The
  *         terminator is sent even after a failed result.
  */
-esp_err_t hal_ble_send_wifi_scan_results(const hal_ble_wifi_scan_result_t *results, size_t count);
+esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_ble_wifi_scan_result_t *results,
+                                         size_t count);
 
 /**
- * @brief Send WiFi configuration result to connected client
+ * @brief Send the WiFi configuration result to the client that sent it
  *
+ * @param session Session of the WIFI_CONFIG request
  * @param success true if WiFi connected successfully
  * @param ip_addr IP address if connected (NULL sends "")
  * @param message Status message
- * @return ESP_OK on success, error code otherwise
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone,
+ *         another error code otherwise
  */
-esp_err_t hal_ble_send_wifi_config_result(bool success, const char *ip_addr, const char *message);
+esp_err_t hal_ble_send_wifi_config_result(hal_ble_session_t session, bool success, const char *ip_addr,
+                                          const char *message);
 
 /**
- * @brief Send URL_SET / SDM provisioning result to connected client
+ * @brief Send the URL_SET / SDM provisioning result to the client that sent it
  *
  * Payload is a compact JSON object:
  * {"success":bool,"code":int,"message":"..."}
  *
+ * @param session Session of the URL_SET request
  * @param success true if SDM configured successfully
  * @param code Stable application-facing result code
  * @param message Human-readable result message
- * @return ESP_OK on success, error code otherwise
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone,
+ *         another error code otherwise
  */
-esp_err_t hal_ble_send_url_set_result(bool success, int32_t code, const char *message);
+esp_err_t hal_ble_send_url_set_result(hal_ble_session_t session, bool success, int32_t code, const char *message);
 
 /**
  * @brief Deinitialize the BLE subsystem
  *
- * Stops advertising, disconnects clients, and frees resources.
+ * Stops advertising, disconnects clients, and frees resources. Do not call it
+ * while a hal_ble_send_*() call runs on another task.
  *
  * @return ESP_OK on success, error code otherwise
  */
