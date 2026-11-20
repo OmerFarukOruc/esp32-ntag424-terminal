@@ -103,6 +103,28 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  host-tests:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    container:
+      image: espressif/idf:v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install the OpenSSL headers
+        run: apt-get update && apt-get install -y --no-install-recommends libssl-dev
+      # The BLE suite compiles the managed cJSON component that dependencies.lock pins.
+      - name: Resolve the managed components
+        run: . "$IDF_PATH/export.sh" && idf.py reconfigure
+      - name: Check that the reconfigure left dependencies.lock unchanged
+        run: git diff --exit-code dependencies.lock
+      - run: test/host/run.sh
+
   # The default build compiles one side of each #if CONFIG_HAL_*; each
   # sdkconfig.ci.* file flips the options so the other side compiles too.
   build-kconfig:
@@ -132,7 +154,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [pre-commit, gitleaks, build, build-kconfig]
+    needs: [pre-commit, gitleaks, build, build-kconfig, host-tests]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
