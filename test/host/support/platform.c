@@ -19,6 +19,8 @@ int64_t host_now_us;
 bool host_in_host;
 bool host_blocked_in_host;
 void (*host_on_block)(void);
+void (*host_on_delay)(void);
+jmp_buf *host_task_blocks;
 
 int64_t esp_timer_get_time(void)
 {
@@ -28,6 +30,9 @@ int64_t esp_timer_get_time(void)
 void vTaskDelay(TickType_t ticks)
 {
     host_blocked_in_host |= host_in_host && ticks > 0;
+    if (host_on_delay != NULL) {
+        host_on_delay();
+    }
     host_now_us += (int64_t)ticks * portTICK_PERIOD_MS * 1000;
 }
 
@@ -184,8 +189,41 @@ BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack, void
     tasks[task_count].fn = fn;
     tasks[task_count].arg = arg;
     tasks[task_count].alive = true;
+    if (out != NULL) {
+        *out = &tasks[task_count];
+    }
     task_count++;
     return pdPASS;
+}
+
+int host_task_wakeups;
+
+static uint32_t notifications;
+
+BaseType_t xTaskNotifyGive(TaskHandle_t t)
+{
+    host_task_wakeups++;
+    notifications++;
+    return pdPASS;
+}
+
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait)
+{
+    if (wait == portMAX_DELAY && notifications == 0) {
+        longjmp(*host_task_blocks, 1);
+    }
+    if (wait != portMAX_DELAY && notifications == 0) {
+        if (host_on_delay != NULL) {
+            host_on_delay();
+        }
+        if (notifications == 0) {
+            host_now_us += (int64_t)wait * portTICK_PERIOD_MS * 1000;
+            return 0;
+        }
+    }
+    uint32_t taken = notifications;
+    notifications = clear ? 0 : notifications - 1;
+    return taken;
 }
 
 void vTaskDelete(TaskHandle_t t)

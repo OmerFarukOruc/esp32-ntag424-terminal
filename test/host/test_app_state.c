@@ -330,6 +330,47 @@ int main(void)
              slept_while_wifi_up, trace.net_deinit, trace.slept);
     check("critical battery sleeps only after WiFi stops too",
           slept_while_wifi_up == 0 && trace.net_deinit == 2 && trace.slept == 1, d);
+
+    static const struct {
+        const char *name;
+        hal_button_event_t event;
+        uint32_t hold_ms;
+        app_event_t posted;
+    } refused_cases[] = {
+        {"short release", HAL_BUTTON_EVENT_RELEASE, 400, APP_EVENT_BUTTON_SHORT},
+        {"3 s hold", HAL_BUTTON_EVENT_HOLD, 3000, APP_EVENT_BUTTON_HOLD_3S},
+        {"10 s hold", HAL_BUTTON_EVENT_HOLD, 10000, APP_EVENT_BUTTON_HOLD_10S},
+    };
+    for (size_t i = 0; i < sizeof refused_cases / sizeof refused_cases[0]; i++) {
+        reset(APP_STATE_IDLE);
+        atomic_store(&s_overflow_alarm, false);
+        atomic_store(&s_consecutive_overflows, 1);
+        event_msg_t filler = {.event = APP_EVENT_BUTTON_SHORT};
+        while (xQueueSend(s_event_queue, &filler, 0) == pdTRUE) {
+        }
+        int refused = 0;
+        for (int k = 0; k < QUEUE_OVERFLOW_THRESHOLD + 2; k++) {
+            refused += button_callback(refused_cases[i].event, refused_cases[i].hold_ms) == ESP_ERR_TIMEOUT;
+        }
+        bool alarm = atomic_load(&s_overflow_alarm);
+        unsigned streak = atomic_load(&s_consecutive_overflows);
+        while (xQueueReceive(s_event_queue, &filler, 0) == pdTRUE) {
+        }
+        esp_err_t accepted = button_callback(refused_cases[i].event, refused_cases[i].hold_ms);
+        event_msg_t queued = {.event = APP_EVENT_COUNT};
+        xQueueReceive(s_event_queue, &queued, 0);
+        snprintf(d, sizeof d,
+                 "refused while the queue was full=%d of %d, overflow alarm=%d, streak=%u, drops recorded=%d, "
+                 "accepted after=%s, queued event=%s",
+                 refused, QUEUE_OVERFLOW_THRESHOLD + 2, alarm, streak, trace.diag_queue_overflows,
+                 esp_err_to_name(accepted), queued.event < APP_EVENT_COUNT ? s_event_names[queued.event] : "none");
+        char name[120];
+        snprintf(name, sizeof name,
+                 "a %s refused by a full event queue is reported to the button HAL, counts as no drop, and is "
+                 "queued when offered again", refused_cases[i].name);
+        check(name, refused == QUEUE_OVERFLOW_THRESHOLD + 2 && !alarm && streak == 1 &&
+              trace.diag_queue_overflows == 0 && accepted == ESP_OK && queued.event == refused_cases[i].posted, d);
+    }
     vQueueDelete(s_event_queue);
     return check_summary();
 }

@@ -4,17 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * @file hal_button.c
- * @brief Button HAL implementation with debounce and hold detection
- */
-
 #include "hal_button.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include <string.h>
 
@@ -25,7 +19,8 @@ static const char *TAG = "hal_button";
 #define HOLD_CHECK_INTERVAL_US  (100 * 1000)
 #define HOLD_STEP_MS            1000
 #define HOLD_MAX_STEPS          10
-#define EVENT_QUEUE_LEN         (1 + HOLD_MAX_STEPS + 1)
+#define PRESS_SLOTS             2
+#define RETRY_MS                25
 #define EVENT_TASK_STACK        4096
 #define EVENT_TASK_PRIORITY     5
 
@@ -43,20 +38,27 @@ _Static_assert(GPIO_IS_VALID_GPIO(CONFIG_HAL_BUTTON_GPIO), "HAL_BUTTON_GPIO is n
 #endif
 
 typedef struct {
-    hal_button_event_t event;
-    uint32_t hold_ms;
-} button_msg_t;
+    int64_t start_us;
+    uint32_t release_ms;
+    uint8_t steps_seen;
+    uint8_t steps_sent;
+    bool press_sent;
+    bool released;
+} press_t;
 
 static struct {
     bool initialized;
     hal_button_event_cb_t event_cb;
     bool pressed;
-    int64_t press_start_us;
-    int last_hold_step;
+    bool ignoring_press;
     esp_timer_handle_t debounce_timer;
     esp_timer_handle_t hold_timer;
-    QueueHandle_t queue;
-} s_button;
+    TaskHandle_t task;
+    portMUX_TYPE lock;
+    press_t presses[PRESS_SLOTS];
+    uint8_t oldest;
+    uint8_t count;
+} s_button = {.lock = portMUX_INITIALIZER_UNLOCKED};
 
 static bool read_pressed(void)
 {
@@ -64,29 +66,109 @@ static bool read_pressed(void)
     return level == BUTTON_PRESSED_LEVEL;
 }
 
-static uint32_t hold_duration_ms(void)
+static uint8_t steps_in(uint32_t held_ms)
 {
-    return (uint32_t)((esp_timer_get_time() - s_button.press_start_us) / 1000);
+    uint32_t steps = held_ms / HOLD_STEP_MS;
+    return (uint8_t)(steps < HOLD_MAX_STEPS ? steps : HOLD_MAX_STEPS);
 }
 
-static void queue_event(hal_button_event_t event, uint32_t hold_ms)
+static void wake_event_task(void)
 {
-    button_msg_t msg = { .event = event, .hold_ms = hold_ms };
-    if (xQueueSend(s_button.queue, &msg, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Event queue full, dropped event %d", (int)event);
-    }
+    xTaskNotifyGive(s_button.task);
 }
 
-static void queue_hold_steps(uint32_t held_ms)
+static press_t *newest_press(void)
 {
-    int step = held_ms / HOLD_STEP_MS;
-    if (step > HOLD_MAX_STEPS) {
-        step = HOLD_MAX_STEPS;
+    return &s_button.presses[(s_button.oldest + s_button.count - 1) % PRESS_SLOTS];
+}
+
+static uint32_t held_ms(const press_t *press)
+{
+    return (uint32_t)((esp_timer_get_time() - press->start_us) / 1000);
+}
+
+static bool begin_press(void)
+{
+    portENTER_CRITICAL(&s_button.lock);
+    bool room = s_button.count < PRESS_SLOTS;
+    if (room) {
+        s_button.count++;
+        *newest_press() = (press_t) {
+            .start_us = esp_timer_get_time()
+        };
     }
-    while (s_button.last_hold_step < step) {
-        s_button.last_hold_step++;
-        queue_event(HAL_BUTTON_EVENT_HOLD, s_button.last_hold_step * HOLD_STEP_MS);
+    portEXIT_CRITICAL(&s_button.lock);
+    return room;
+}
+
+static uint8_t record_hold(bool released)
+{
+    portENTER_CRITICAL(&s_button.lock);
+    if (s_button.count == 0 || newest_press()->released) {
+        portEXIT_CRITICAL(&s_button.lock);
+        return 0;
     }
+    press_t *press = newest_press();
+    uint32_t ms = held_ms(press);
+    uint8_t steps = steps_in(ms);
+    press->steps_seen = steps;
+    if (released) {
+        press->release_ms = ms;
+        press->released = true;
+    }
+    portEXIT_CRITICAL(&s_button.lock);
+    return steps;
+}
+
+static bool next_event(hal_button_event_t *event, uint32_t *hold_ms)
+{
+    bool found = true;
+    portENTER_CRITICAL(&s_button.lock);
+    const press_t *press = &s_button.presses[s_button.oldest];
+    if (s_button.count == 0) {
+        found = false;
+    } else if (!press->press_sent) {
+        *event = HAL_BUTTON_EVENT_PRESS;
+        *hold_ms = 0;
+    } else if (press->steps_sent < press->steps_seen) {
+        *event = HAL_BUTTON_EVENT_HOLD;
+        *hold_ms = (press->steps_sent + 1) * HOLD_STEP_MS;
+    } else if (press->released) {
+        *event = HAL_BUTTON_EVENT_RELEASE;
+        *hold_ms = press->release_ms;
+    } else {
+        found = false;
+    }
+    portEXIT_CRITICAL(&s_button.lock);
+    return found;
+}
+
+static void mark_accepted(hal_button_event_t event)
+{
+    portENTER_CRITICAL(&s_button.lock);
+    press_t *press = &s_button.presses[s_button.oldest];
+    if (event == HAL_BUTTON_EVENT_PRESS) {
+        press->press_sent = true;
+    } else if (event == HAL_BUTTON_EVENT_HOLD) {
+        press->steps_sent++;
+    } else {
+        s_button.oldest = (s_button.oldest + 1) % PRESS_SLOTS;
+        s_button.count--;
+    }
+    portEXIT_CRITICAL(&s_button.lock);
+}
+
+static bool deliver_pending(void)
+{
+    hal_button_event_t event;
+    uint32_t hold_ms;
+    while (next_event(&event, &hold_ms)) {
+        if (s_button.event_cb(event, hold_ms) != ESP_OK) {
+            return false;
+        }
+        mark_accepted(event);
+    }
+    return true;
 }
 
 static void IRAM_ATTR gpio_isr_handler(void *arg)
@@ -96,49 +178,54 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
     esp_timer_start_once(s_button.debounce_timer, DEBOUNCE_TIME_US);
 }
 
+static void reenable_and_recheck_level(void)
+{
+    gpio_intr_enable(BUTTON_GPIO);
+    if (read_pressed() != s_button.pressed) {
+        esp_timer_start_once(s_button.debounce_timer, DEBOUNCE_TIME_US);
+    }
+}
+
 static void debounce_timer_callback(void *arg)
 {
     bool pressed = read_pressed();
 
     if (pressed && !s_button.pressed) {
         s_button.pressed = true;
-        s_button.press_start_us = esp_timer_get_time();
-        s_button.last_hold_step = 0;
-        queue_event(HAL_BUTTON_EVENT_PRESS, 0);
-        esp_timer_start_periodic(s_button.hold_timer, HOLD_CHECK_INTERVAL_US);
+        s_button.ignoring_press = !begin_press();
+        if (s_button.ignoring_press) {
+            ESP_LOGW(TAG, "Two earlier presses still wait for the application, ignoring this press");
+        } else {
+            esp_timer_start_periodic(s_button.hold_timer, HOLD_CHECK_INTERVAL_US);
+            wake_event_task();
+        }
     } else if (!pressed && s_button.pressed) {
-        uint32_t held_ms = hold_duration_ms();
         s_button.pressed = false;
-        esp_timer_stop(s_button.hold_timer);
-        queue_hold_steps(held_ms);
-        queue_event(HAL_BUTTON_EVENT_RELEASE, held_ms);
+        if (!s_button.ignoring_press) {
+            esp_timer_stop(s_button.hold_timer);
+            record_hold(true);
+            wake_event_task();
+        }
     }
 
-    gpio_intr_enable(BUTTON_GPIO);
-
-    /* An edge between the read above and the re-enable raised no interrupt. */
-    if (read_pressed() != s_button.pressed) {
-        esp_timer_start_once(s_button.debounce_timer, DEBOUNCE_TIME_US);
-    }
+    reenable_and_recheck_level();
 }
 
 static void hold_timer_callback(void *arg)
 {
-    queue_hold_steps(hold_duration_ms());
-    if (s_button.last_hold_step == HOLD_MAX_STEPS) {
+    if (record_hold(false) == HOLD_MAX_STEPS) {
         esp_timer_stop(s_button.hold_timer);
     }
+    wake_event_task();
 }
 
 static void button_event_task(void *arg)
 {
-    button_msg_t msg;
-
     for (;;) {
-        if (xQueueReceive(s_button.queue, &msg, portMAX_DELAY) != pdTRUE) {
-            continue;
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        while (!deliver_pending()) {
+            vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
         }
-        s_button.event_cb(msg.event, msg.hold_ms);
     }
 }
 
@@ -163,8 +250,6 @@ esp_err_t hal_button_init(hal_button_event_cb_t event_cb)
     ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "GPIO config failed");
 
     s_button.event_cb = event_cb;
-    s_button.queue = xQueueCreate(EVENT_QUEUE_LEN, sizeof(button_msg_t));
-    ESP_GOTO_ON_FALSE(s_button.queue, ESP_ERR_NO_MEM, fail, TAG, "Failed to create event queue");
 
     const esp_timer_create_args_t debounce_args = {
         .callback = debounce_timer_callback,
@@ -185,14 +270,17 @@ esp_err_t hal_button_init(hal_button_event_cb_t event_cb)
     ret = gpio_install_isr_service(0);
     ESP_GOTO_ON_FALSE(ret == ESP_OK || ret == ESP_ERR_INVALID_STATE, ret, fail, TAG,
                       "GPIO ISR service install failed");
-    ESP_GOTO_ON_ERROR(gpio_isr_handler_add(BUTTON_GPIO, gpio_isr_handler, NULL), fail, TAG,
-                      "GPIO ISR handler add failed");
 
-    /* The task keeps callbacks off the esp_timer task, which must not block. It starts last, so a
-     * failed init never has a task to stop. */
     ESP_GOTO_ON_FALSE(xTaskCreate(button_event_task, "btn_event", EVENT_TASK_STACK, NULL,
-                                  EVENT_TASK_PRIORITY, NULL) == pdPASS,
+                                  EVENT_TASK_PRIORITY, &s_button.task) == pdPASS,
                       ESP_ERR_NO_MEM, fail, TAG, "Failed to create event task");
+
+    ret = gpio_isr_handler_add(BUTTON_GPIO, gpio_isr_handler, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GPIO ISR handler add failed");
+        vTaskDelete(s_button.task);
+        goto fail;
+    }
 
     s_button.initialized = true;
     ESP_LOGI(TAG, "Initialized on GPIO%d (active_low=%d, pullup=%d, debounce=%dms)",
@@ -210,9 +298,7 @@ fail:
         esp_timer_stop(s_button.hold_timer);
         esp_timer_delete(s_button.hold_timer);
     }
-    if (s_button.queue) {
-        vQueueDelete(s_button.queue);
-    }
     memset(&s_button, 0, sizeof(s_button));
+    s_button.lock = (portMUX_TYPE)portMUX_INITIALIZER_UNLOCKED;
     return ret;
 }

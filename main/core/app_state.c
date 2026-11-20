@@ -102,31 +102,34 @@ static bool s_boot_fault;  /* Written before INIT_COMPLETE is queued, read by th
 static atomic_uint s_consecutive_overflows;
 static atomic_bool s_overflow_alarm;
 
+static esp_err_t send_event(app_event_t event, hal_ble_session_t session, const void *data, size_t data_len,
+                            TickType_t wait)
+{
+    event_msg_t msg = {.event = event, .session = session, .data_len = data_len};
+    if (data_len > 0) {
+        memcpy(msg.data, data, data_len);
+    }
+    return xQueueSend(s_event_queue, &msg, wait) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
 static esp_err_t post_event(app_event_t event, hal_ble_session_t session, const void *data, size_t data_len,
                             TickType_t wait)
 {
     ESP_RETURN_ON_FALSE(s_event_queue != NULL, ESP_ERR_INVALID_STATE, TAG, "Event queue not created");
     ESP_RETURN_ON_FALSE(data_len <= EVENT_DATA_MAX, ESP_ERR_INVALID_SIZE, TAG, "Event data too large");
 
-    event_msg_t msg = {.event = event, .session = session, .data_len = data_len};
-    if (data_len > 0) {
-        memcpy(msg.data, data, data_len);
-    }
-
-    esp_err_t ret = ESP_OK;
-    if (xQueueSend(s_event_queue, &msg, wait) == pdTRUE) {
+    esp_err_t ret = send_event(event, session, data, data_len, wait);
+    if (ret == ESP_OK) {
         atomic_store(&s_consecutive_overflows, 0);
     } else {
         hal_diagnostics_record_queue_overflow();
         unsigned overflows = atomic_fetch_add(&s_consecutive_overflows, 1) + 1;
-        /* Callers run on NimBLE, esp_event and button tasks, so a stuck queue logs only at powers of two. */
         if ((overflows & (overflows - 1)) == 0) {
             ESP_LOGE(TAG, "Event queue full, dropping %s (%u in a row)", s_event_names[event], overflows);
         }
         if (overflows >= QUEUE_OVERFLOW_THRESHOLD) {
             atomic_store(&s_overflow_alarm, true);
         }
-        ret = ESP_ERR_TIMEOUT;
     }
 
     return ret;
@@ -193,24 +196,48 @@ esp_err_t app_post_event_wait(app_event_t event, const void *data, size_t data_l
     return post_event(event, HAL_BLE_SESSION_NONE, data, data_len, portMAX_DELAY);
 }
 
-static void button_callback(hal_button_event_t event, uint32_t hold_time_ms)
+static esp_err_t post_button_event(app_event_t event)
+{
+    static bool refused;
+    esp_err_t ret = send_event(event, HAL_BLE_SESSION_NONE, NULL, 0, 0);
+    if (ret == ESP_OK) {
+        refused = false;
+    } else if (!refused) {
+        ESP_LOGW(TAG, "Event queue full, %s waits in the button HAL", s_event_names[event]);
+        refused = true;
+    }
+    return ret;
+}
+
+static void log_button_event(hal_button_event_t event, uint32_t hold_time_ms)
 {
     if (event == HAL_BUTTON_EVENT_PRESS) {
         ESP_LOGI(TAG, "Button pressed");
     } else if (event == HAL_BUTTON_EVENT_RELEASE) {
         ESP_LOGI(TAG, "Button released (held %lu ms)", (unsigned long)hold_time_ms);
-        if (hold_time_ms < 1000) {
-            app_post_event(APP_EVENT_BUTTON_SHORT, NULL, 0);
-        }
     } else if (hold_time_ms == 3000) {
         ESP_LOGW(TAG, "Button hold: 3 s, BLE onboarding");
-        app_post_event(APP_EVENT_BUTTON_HOLD_3S, NULL, 0);
     } else if (hold_time_ms == 10000) {
         ESP_LOGE(TAG, "Button hold: 10 s, factory reset");
-        app_post_event(APP_EVENT_BUTTON_HOLD_10S, NULL, 0);
     } else {
         ESP_LOGI(TAG, "Button hold: %lu s", (unsigned long)(hold_time_ms / 1000));
     }
+}
+
+static esp_err_t button_callback(hal_button_event_t event, uint32_t hold_time_ms)
+{
+    esp_err_t ret = ESP_OK;
+    if (event == HAL_BUTTON_EVENT_RELEASE && hold_time_ms < 1000) {
+        ret = post_button_event(APP_EVENT_BUTTON_SHORT);
+    } else if (event == HAL_BUTTON_EVENT_HOLD && hold_time_ms == 3000) {
+        ret = post_button_event(APP_EVENT_BUTTON_HOLD_3S);
+    } else if (event == HAL_BUTTON_EVENT_HOLD && hold_time_ms == 10000) {
+        ret = post_button_event(APP_EVENT_BUTTON_HOLD_10S);
+    }
+    if (ret == ESP_OK) {
+        log_button_event(event, hold_time_ms);
+    }
+    return ret;
 }
 
 /* Runs on the system event task: it only queues the change for the state task. */
@@ -469,7 +496,6 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
         break;
 
     case APP_STATE_WRITING_TAG:
-        /* The write ends with URL_SET_DONE. Buttons wait until then. */
         switch (event) {
         case APP_EVENT_URL_SET:
             app_url_set_reject(session, "nfc_config_busy");

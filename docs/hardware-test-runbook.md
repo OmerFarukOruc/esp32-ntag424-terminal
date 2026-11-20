@@ -142,6 +142,8 @@ Verifies the debounce and the hold events on the button GPIO.
 | Press and release quickly | `app_state: Button pressed`, then `Button released (held <n> ms)` | [ ] |
 | Hold 2 s, release | `Button hold: 1 s`, `Button hold: 2 s`, `Button released (held ~2000 ms)`, no state change | [ ] |
 | Hold 3 s | `Button hold: 1 s`, `Button hold: 2 s`, then `Button hold: 3 s, BLE onboarding` (warning level). See test 4. | [ ] |
+| Release at about 3.05 s | `Button hold: 3 s, BLE onboarding` comes before `Button released (held ~3050 ms)` | [ ] |
+| Three quick presses in a row, under 1 s each, with the event queue empty | Three `Button pressed` and `Button released` pairs in order, none mixed with another press | [ ] |
 
 A press shorter than 1000 ms counts as a short press. A hold fires one event per second, from 1 s to 10 s. Contact bounce within 50 ms must not produce extra press lines.
 
