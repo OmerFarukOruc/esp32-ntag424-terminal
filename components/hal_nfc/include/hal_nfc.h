@@ -15,8 +15,9 @@
  * AES-128 key 0 and leaves the SDM keys at their factory all-zero value. It
  * never calls ChangeKey, because an interrupted key change can lock a tag for
  * good. Anyone who knows this firmware can decrypt picc_data and compute a
- * valid cmac, so SDM shows only that a tap happened, not that a genuine tag
- * produced it. A tag with a changed key 0 fails with HAL_NFC_ERR_AUTH.
+ * valid cmac for any UID and counter without a tag, so a valid request shows
+ * neither that a tag was tapped nor that a genuine tag produced it. A tag with
+ * a changed key 0 fails with HAL_NFC_ERR_AUTH.
  *
  * Built with the GPL-3.0 revk/ESP32-PN532 library, so a released binary is a
  * GPL-3.0 combined work.

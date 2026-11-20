@@ -40,8 +40,9 @@ menu "HAL NFC"
             place, the factory all-zero AES-128 keys (key 0 and the SDM file
             read key). It never calls ChangeKey, because an interrupted key
             change can lock a tag for good. Anyone who knows this firmware can
-            therefore decrypt picc_data and compute a valid cmac, so SDM proves
-            only that a tap happened, not that a genuine tag produced it. A tag
+            therefore decrypt picc_data and compute a valid cmac for any UID
+            and counter without a tag, so a valid request shows neither that a
+            tag was tapped nor that a genuine tag produced it. A tag
             whose key 0 was changed cannot be configured by this firmware.
 
 endmenu

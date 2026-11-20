@@ -270,18 +270,26 @@ A backend verifies a request in these steps.
 2. Build the session vector `3CC300010080 || UID || counter` (16 bytes, counter as read from the plaintext). The session MAC key is the AES-CMAC of that vector under key 2.
 3. Compute the AES-CMAC of the empty message under the session MAC key. The firmware sets the MAC input offset equal to the MAC offset, so nothing is MACed.
 4. Keep bytes 1, 3, 5 up to 15 of the 16 byte result. This 8 byte value must equal `cmac`.
-5. Accept the request only when the counter is greater than the last counter seen for that UID. The counter rises with every NDEF read, not with every tap. A phone that polls the tag reads many times, so do not require `last + 1`. The counter has 24 bits.
+5. Accept the request only when the counter is greater than the last counter seen for that UID. The counter rises with every NDEF read, not with every tap. A phone that polls the tag reads many times, so do not require `last + 1`. The counter has 24 bits. Compare and store the counter in one atomic step per UID, so two requests with the same counter cannot both pass. Also check that the UID belongs to the `<device_id>` in the path, because the tag MACs only its UID and counter, not the URL.
 
-This Python function implements the steps. It needs the `cryptography` package, and the all-zero key stands for the factory key:
+This Python function implements the steps. It needs the `cryptography` package, and the all-zero key stands for the factory key. It returns the UID and counter of a valid request, and `None` for any other input, including hex of the wrong length:
 
 ```python
+import hmac
+import re
+
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.cmac import CMAC
 
 KEY = bytes(16)
+HEX = re.compile(r"[0-9A-Fa-f]*")
 
 
 def verify(picc_hex, cmac_hex, last_counter):
+    if not (isinstance(picc_hex, str) and isinstance(cmac_hex, str)):
+        return None
+    if len(picc_hex) != 32 or len(cmac_hex) != 16 or not HEX.fullmatch(picc_hex + cmac_hex):
+        return None
     dec = Cipher(algorithms.AES(KEY), modes.CBC(bytes(16))).decryptor()
     plain = dec.update(bytes.fromhex(picc_hex)) + dec.finalize()
     if plain[0] != 0xC7:
@@ -291,7 +299,7 @@ def verify(picc_hex, cmac_hex, last_counter):
     mac_key.update(bytes.fromhex("3CC300010080") + uid + plain[8:11])
     mac = CMAC(algorithms.AES(mac_key.finalize()))
     mac.update(b"")
-    if mac.finalize()[1::2] != bytes.fromhex(cmac_hex) or counter <= last_counter:
+    if not hmac.compare_digest(mac.finalize()[1::2], bytes.fromhex(cmac_hex)) or counter <= last_counter:
         return None
     return uid.hex().upper(), counter
 ```
@@ -312,7 +320,7 @@ printf '' | openssl mac -cipher AES-128-CBC -macopt hexkey:$SK CMAC
 
 This firmware is a demo. Treat it that way until per-tag keys exist.
 
-- **Factory keys on the tag.** The tags keep NXP's factory all-zero AES-128 keys. The firmware authenticates with key 0 and never calls ChangeKey, because an interrupted key change can lock a tag for good. Anyone who knows this firmware can decrypt `picc_data` and forge a valid `cmac`. SDM then shows only that a tap happened, not that a genuine tag produced it. A tag whose key 0 was changed cannot be configured by this firmware.
+- **Factory keys on the tag.** The tags keep NXP's factory all-zero AES-128 keys. The firmware authenticates with key 0 and never calls ChangeKey, because an interrupted key change can lock a tag for good. Anyone who knows this firmware can decrypt `picc_data` and compute a valid `cmac` for any UID and counter, without a tag. A request that passes the check therefore shows neither that a tag was tapped nor that a genuine tag produced it. The demo shows the SDM calculation only. A tag whose key 0 was changed cannot be configured by this firmware.
 - **Plain NVS.** NVS is not encrypted and flash encryption is off. The WiFi credentials, the BLE bond keys, and the device id sit in plain flash and can be read from the chip.
 - **Just Works pairing.** BLE pairing has no passkey and no man-in-the-middle protection. A device in range that connects during onboarding can pair, then read DEVICE_INFO, scan, write WiFi credentials, and write the device id. Run onboarding only in a place you trust, and only for as long as it takes.
 - **Open onboarding window.** The device advertises until a short press, a 3 s hold, or a WIFI_CONFIG ends it. Nothing times it out.
