@@ -5,6 +5,7 @@
  */
 
 #include <stdatomic.h>
+#include <stdbool.h>
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "pn532_io_deadline.h"
@@ -26,6 +27,12 @@ void pn532_io_deadline_clear(void)
 }
 
 int __real_uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length, TickType_t ticks_to_wait);
+int __real_uart_write_bytes(uart_port_t uart_num, const void *src, size_t size);
+
+static bool bounded(uart_port_t uart_num)
+{
+    return (int)uart_num == atomic_load(&s_port);
+}
 
 static TickType_t ticks_until(int64_t end_us)
 {
@@ -39,7 +46,7 @@ static TickType_t ticks_until(int64_t end_us)
 
 int __wrap_uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length, TickType_t ticks_to_wait)
 {
-    if ((int)uart_num != atomic_load(&s_port)) {
+    if (!bounded(uart_num)) {
         return __real_uart_read_bytes(uart_num, buf, length, ticks_to_wait);
     }
 
@@ -58,4 +65,12 @@ int __wrap_uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length, Tic
         got++;
     }
     return (int)got;
+}
+
+int __wrap_uart_write_bytes(uart_port_t uart_num, const void *src, size_t size)
+{
+    if (bounded(uart_num) && ticks_until(atomic_load(&s_deadline_us)) == 0) {
+        return -1;
+    }
+    return __real_uart_write_bytes(uart_num, src, size);
 }

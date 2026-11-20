@@ -83,7 +83,8 @@ esp_err_t hal_nfc_init(void);
  * The call blocks the calling task until the tag is configured, the attempts
  * run out, or timeout_ms passes. timeout_ms counts from the call and covers the
  * wait for the reader, PN532 recovery and every tag command. No tag command
- * starts after it passes; releasing the tag may take up to 200 ms more.
+ * starts after it passes. Each release of the tag ends within 200 ms of its
+ * start and no later than 200 ms past timeout_ms.
  *
  * @param[in] device_id Device identifier for the URL path: 1 to
  *            HAL_NFC_DEVICE_ID_MAX_LEN characters from [A-Za-z0-9_-]

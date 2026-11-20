@@ -18,7 +18,7 @@ idf_component_register(
     PRIV_REQUIRES esp_driver_gpio esp_timer
 )
 
-# pn532_io_deadline.c bounds the library's UART reads without changing the submodule. See
+# pn532_io_deadline.c bounds the library's UART reads and writes without changing the submodule. See
 # "Wrappers to redefine or extend existing functions" in the ESP-IDF v6.1 build system guide:
 # https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-guides/build-system.html
-target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=uart_read_bytes")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=uart_read_bytes,--wrap=uart_write_bytes")
