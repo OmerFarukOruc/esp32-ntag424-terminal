@@ -75,9 +75,11 @@ esp_err_t hal_network_init(void);
  *
  * Do not call it while hal_wifi_scan() runs.
  *
- * The registered callback stays registered for the next init.
+ * The registered callback stays registered for the next init. When the WiFi
+ * driver does not stop or deinit, the HAL is no longer usable, hal_network_init()
+ * returns ESP_ERR_INVALID_STATE, and the call can be repeated.
  *
- * @return esp_err_t ESP_OK on success
+ * @return ESP_OK on success, or the error of esp_wifi_stop() or esp_wifi_deinit()
  */
 esp_err_t hal_network_deinit(void);
 

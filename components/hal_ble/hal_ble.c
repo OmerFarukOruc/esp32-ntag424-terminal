@@ -18,6 +18,7 @@
  */
 
 #include "hal_ble.h"
+#include "hal_ble_notify.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -54,13 +55,9 @@ void ble_store_config_init(void);
 
 /* Chosen, not from a source: a 32-byte SSID and a 64-byte password with the JSON keys need about 120 bytes. */
 #define WRITE_MAX_LEN 200
-/* Chosen, not from a source: a scan entry whose 32-byte SSID is all \u00XX escapes is about 240 bytes. */
-#define NOTIFY_BUF_SIZE 256
-/* Chosen, not from a source: NimBLE returns BLE_HS_ENOMEM while its buffer pool is empty. */
-#define NOTIFY_SEND_ATTEMPTS 3
-#define NOTIFY_RETRY_DELAY_MS 20
-/* ATT notification header: 1 byte opcode and 2 bytes handle (Bluetooth Core Spec, Vol 3, Part F, 3.4.7.1). */
-#define ATT_NOTIFY_OVERHEAD 3
+/* Chosen, not from a source: a refused disconnect is tried again once a second until it succeeds or the client
+ * leaves. */
+#define END_RETRY_MS 1000
 /* Common profile error codes (Core Specification Supplement, Part B); NimBLE does not define them. */
 #define ATT_ERR_WRITE_REQUEST_REJECTED 0xFC
 #define ATT_ERR_CCCD_IMPROPER 0xFD
@@ -84,17 +81,23 @@ static const ble_uuid128_t wifi_scan_chr_uuid = ONBOARDING_UUID(0x03);
 static const ble_uuid128_t wifi_config_chr_uuid = ONBOARDING_UUID(0x04);
 static const ble_uuid128_t url_set_chr_uuid = ONBOARDING_UUID(0x06);
 
-typedef struct {
-    uint16_t val_handle;
-    atomic_bool subscribed;  /* ble_gatts_notify_custom() does not check the CCCD, so the flag does */
-} notify_chr_t;
+typedef enum {
+    BLE_STAGE_OFF,
+    BLE_STAGE_RUNNING,
+    BLE_STAGE_PORT_FAILED,
+} ble_stage_t;
 
-static atomic_bool s_initialized;
-static atomic_bool s_adv_wanted;  /* True from start_advertising until stop_advertising */
+static _Atomic ble_stage_t s_stage = BLE_STAGE_OFF;
+static atomic_bool s_adv_wanted;
 static _Atomic hal_ble_session_t s_session = HAL_BLE_SESSION_NONE;
-static uint16_t s_connection_count;
+static _Atomic hal_ble_session_t s_end_request;
 static uint8_t s_own_addr_type;
 static struct ble_npl_event s_adv_event;
+static struct ble_npl_event s_end_event;
+static struct ble_npl_callout s_end_retry;
+
+static hal_ble_session_t s_host_last_session;
+static uint16_t s_host_conn_handle;
 
 static notify_chr_t s_wifi_scan;
 static notify_chr_t s_wifi_config;
@@ -109,7 +112,7 @@ static portMUX_TYPE s_id_lock = portMUX_INITIALIZER_UNLOCKED;
 /* Returns 0 when the client can receive the reply notification on chr, otherwise an ATT error code. */
 static int reply_possible(uint16_t conn_handle, notify_chr_t *chr)
 {
-    if (!atomic_load(&chr->subscribed)) {
+    if (!chr->subscribed) {
         ESP_LOGW(TAG, "Write refused: notifications are off on this characteristic");
         return ATT_ERR_CCCD_IMPROPER;
     }
@@ -133,16 +136,6 @@ static int admit(hal_ble_event_t event, const void *data, size_t data_len)
     return 0;
 }
 
-static hal_ble_session_t session_make(uint16_t connection_count, uint16_t conn_handle)
-{
-    return ((hal_ble_session_t)connection_count << 16) | conn_handle;
-}
-
-static uint16_t session_conn_handle(hal_ble_session_t session)
-{
-    return (uint16_t)(session & 0xFFFF);
-}
-
 static int device_info_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                                   struct ble_gatt_access_ctxt *ctxt, void *arg);
 static int wifi_scan_chr_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -152,6 +145,7 @@ static int wifi_config_chr_access(uint16_t conn_handle, uint16_t attr_handle,
 static int url_set_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg);
 static int gap_event_handler(struct ble_gap_event *event, void *arg);
+static void end_event_cb(struct ble_npl_event *ev);
 
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
@@ -185,7 +179,7 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     { 0 },
 };
 
-static esp_err_t nimble_to_esp(int rc)
+esp_err_t nimble_to_esp(int rc)
 {
     switch (rc) {
     case 0:
@@ -456,14 +450,27 @@ static void adv_event_cb(struct ble_npl_event *ev)
     adv_reconcile();
 }
 
+static void forget_connection(void)
+{
+    atomic_store(&s_session, HAL_BLE_SESSION_NONE);
+    for (size_t i = 0; i < sizeof(s_notify_chrs) / sizeof(s_notify_chrs[0]); i++) {
+        s_notify_chrs[i]->subscribed = false;
+    }
+}
+
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             ESP_LOGI(TAG, "BLE connected, conn_handle=%d", event->connect.conn_handle);
-            s_connection_count++;
-            atomic_store(&s_session, session_make(s_connection_count, event->connect.conn_handle));
+            if (s_host_last_session + 1 == HAL_BLE_SESSION_NONE) {
+                ESP_LOGE(TAG, "No session number left in this boot, ending the connection");
+                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                break;
+            }
+            s_host_conn_handle = event->connect.conn_handle;
+            atomic_store(&s_session, ++s_host_last_session);
         } else {
             ESP_LOGW(TAG, "BLE connection failed, status=%d", event->connect.status);
             adv_reconcile();
@@ -472,10 +479,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "BLE disconnected, reason=%d", event->disconnect.reason);
-        atomic_store(&s_session, HAL_BLE_SESSION_NONE);
-        for (size_t i = 0; i < sizeof(s_notify_chrs) / sizeof(s_notify_chrs[0]); i++) {
-            atomic_store(&s_notify_chrs[i]->subscribed, false);
-        }
+        forget_connection();
         adv_reconcile();
         break;
 
@@ -485,7 +489,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
                  event->subscribe.prev_notify, event->subscribe.cur_notify);
         for (size_t i = 0; i < sizeof(s_notify_chrs) / sizeof(s_notify_chrs[0]); i++) {
             if (s_notify_chrs[i]->val_handle == event->subscribe.attr_handle) {
-                atomic_store(&s_notify_chrs[i]->subscribed, event->subscribe.cur_notify != 0);
+                s_notify_chrs[i]->subscribed = event->subscribe.cur_notify != 0;
             }
         }
         break;
@@ -571,10 +575,35 @@ static esp_err_t gatt_svc_init(void)
     return ESP_OK;
 }
 
+/* nimble_port_deinit() frees the port's context before it stops the controller, so it must not run twice
+ * (esp-idf v6.1 components/bt/host/nimble/port/src/nimble_port.c) */
+static esp_err_t deinit_port(esp_err_t result)
+{
+    int rc = nimble_port_deinit();
+    if (rc != 0) {
+        atomic_store(&s_stage, BLE_STAGE_PORT_FAILED);
+        ESP_LOGE(TAG, "Failed to deinit the NimBLE port, BLE stays off until restart: %d", rc);
+        return result == ESP_OK ? ESP_FAIL : result;
+    }
+    atomic_store(&s_stage, BLE_STAGE_OFF);
+    return result;
+}
+
+static esp_err_t release_host_not_running(esp_err_t result)
+{
+    ble_npl_callout_stop(&s_end_retry);
+    ble_npl_callout_deinit(&s_end_retry);
+    ble_npl_event_deinit(&s_adv_event);
+    ble_npl_event_deinit(&s_end_event);
+    ble_notify_deinit_events();
+    return deinit_port(result);
+}
+
 esp_err_t hal_ble_init(hal_ble_event_cb_t event_cb)
 {
     ESP_RETURN_ON_FALSE(event_cb != NULL, ESP_ERR_INVALID_ARG, TAG, "event_cb is NULL");
-    ESP_RETURN_ON_FALSE(!atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "already initialized");
+    ESP_RETURN_ON_FALSE(atomic_load(&s_stage) == BLE_STAGE_OFF, ESP_ERR_INVALID_STATE, TAG,
+                        "already initialized, or the NimBLE port failed to deinit");
 
     s_event_cb = event_cb;
     cJSON_InitHooks(&(cJSON_Hooks) {
@@ -587,7 +616,13 @@ esp_err_t hal_ble_init(hal_ble_event_cb_t event_cb)
     snprintf(s_device_name, sizeof(s_device_name), NAME_PREFIX "-%02X%02X", mac[4], mac[5]);
 
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "Failed to init NimBLE port");
+    if (ble_npl_callout_init(&s_end_retry, nimble_port_get_dflt_eventq(), end_event_cb, NULL) != 0) {
+        ESP_LOGE(TAG, "No timer for the disconnect retry");
+        return deinit_port(ESP_ERR_NO_MEM);
+    }
     ble_npl_event_init(&s_adv_event, adv_event_cb, NULL);
+    ble_npl_event_init(&s_end_event, end_event_cb, NULL);
+    ble_notify_init();
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
@@ -603,8 +638,7 @@ esp_err_t hal_ble_init(hal_ble_event_cb_t event_cb)
 
     esp_err_t err = gatt_svc_init();
     if (err != ESP_OK) {
-        nimble_port_deinit();
-        return err;
+        return release_host_not_running(err);
     }
 
     int rc = ble_svc_gap_device_name_set(s_device_name);
@@ -615,7 +649,8 @@ esp_err_t hal_ble_init(hal_ble_event_cb_t event_cb)
     ble_store_config_init();
     nimble_port_freertos_init(ble_host_task);
 
-    atomic_store(&s_initialized, true);
+    ble_notify_set_accepting(true);
+    atomic_store(&s_stage, BLE_STAGE_RUNNING);
     ESP_LOGI(TAG, "BLE HAL initialized, device name: %s", s_device_name);
     return ESP_OK;
 }
@@ -630,10 +665,9 @@ esp_err_t hal_ble_set_device_id(const char *id)
     return ESP_OK;
 }
 
-/* Sets what the host task should do and wakes it. */
 static esp_err_t adv_request(bool wanted)
 {
-    ESP_RETURN_ON_FALSE(atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(atomic_load(&s_stage) == BLE_STAGE_RUNNING, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
     atomic_store(&s_adv_wanted, wanted);
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_adv_event);
@@ -650,16 +684,50 @@ esp_err_t hal_ble_stop_advertising(void)
     return adv_request(false);
 }
 
+static void keep_newest_end_request(hal_ble_session_t session)
+{
+    hal_ble_session_t pending = atomic_load(&s_end_request);
+    while (pending < session && !atomic_compare_exchange_weak(&s_end_request, &pending, session)) {
+    }
+}
+
+static void request_end(hal_ble_session_t session)
+{
+    keep_newest_end_request(session);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_end_event);
+}
+
+static void end_event_cb(struct ble_npl_event *ev)
+{
+    hal_ble_session_t session = atomic_exchange(&s_end_request, 0);
+    if (session == 0 || session != atomic_load(&s_session)) {
+        return;
+    }
+    int rc = ble_gap_terminate(s_host_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc == 0 || rc == BLE_HS_EALREADY || rc == BLE_HS_ENOTCONN) {
+        return;
+    }
+    keep_newest_end_request(session);
+    if (ble_npl_callout_reset(&s_end_retry, ble_npl_time_ms_to_ticks32(END_RETRY_MS)) != BLE_NPL_OK) {
+        ESP_LOGE(TAG, "Failed to disconnect (%d) and to schedule a retry, the next disconnect request retries", rc);
+        return;
+    }
+    ESP_LOGW(TAG, "Failed to disconnect, retrying in %d ms: %d", END_RETRY_MS, rc);
+}
+
 esp_err_t hal_ble_disconnect(void)
 {
     hal_ble_session_t session = atomic_load(&s_session);
-    if (session == HAL_BLE_SESSION_NONE) {
-        return ESP_OK;
+    if (session != HAL_BLE_SESSION_NONE) {
+        request_end(session);
     }
-
-    int rc = ble_gap_terminate(session_conn_handle(session), BLE_ERR_REM_USER_CONN_TERM);
-    ESP_RETURN_ON_FALSE(rc == 0 || rc == BLE_HS_ENOTCONN, nimble_to_esp(rc), TAG, "Failed to disconnect: %d", rc);
     return ESP_OK;
+}
+
+bool ble_host_conn_of(hal_ble_session_t session, uint16_t *conn_handle)
+{
+    *conn_handle = s_host_conn_handle;
+    return session == atomic_load(&s_session);
 }
 
 bool hal_ble_session_is_current(hal_ble_session_t session)
@@ -667,53 +735,19 @@ bool hal_ble_session_is_current(hal_ble_session_t session)
     return session != HAL_BLE_SESSION_NONE && atomic_load(&s_session) == session;
 }
 
-/* Serializes json (taking ownership) into the ATT payload limit and notifies the client of session.
- * built is false when the caller failed to build json whole. Returns ESP_ERR_INVALID_SIZE when the object does
- * not fit in ATT MTU - 3 bytes and ESP_ERR_INVALID_STATE when that client is gone or has no
- * subscription. Waits briefly when the stack is out of buffers, so it must not run on the NimBLE
- * host task. */
-static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON *json, bool built)
+static esp_err_t end_session_on_failure(hal_ble_session_t session, esp_err_t err)
 {
-    char text[NOTIFY_BUF_SIZE];
-    esp_err_t ret = ESP_OK;
-    uint16_t conn = session_conn_handle(session);
-
-    ESP_GOTO_ON_FALSE(built, ESP_ERR_NO_MEM, out, TAG, "Failed to build notification");
-    ESP_GOTO_ON_FALSE(cJSON_PrintPreallocated(json, text, sizeof(text), false), ESP_ERR_INVALID_SIZE, out, TAG,
-                      "Notification does not fit %u bytes", (unsigned)sizeof(text));
-    size_t len = strlen(text);
-
-    for (int attempt = 1; attempt <= NOTIFY_SEND_ATTEMPTS; attempt++) {
-        ESP_GOTO_ON_FALSE(hal_ble_session_is_current(session), ESP_ERR_INVALID_STATE, out, TAG,
-                          "The client that sent the request is gone");
-        ESP_GOTO_ON_FALSE(atomic_load(&chr->subscribed), ESP_ERR_INVALID_STATE, out, TAG,
-                          "Client has not enabled notifications on this characteristic");
-        uint16_t mtu = ble_att_mtu(conn);
-        ESP_GOTO_ON_FALSE(mtu != 0, ESP_ERR_INVALID_STATE, out, TAG, "BLE connection lost");
-        size_t max_len = mtu > ATT_NOTIFY_OVERHEAD ? mtu - ATT_NOTIFY_OVERHEAD : 0;
-        ESP_GOTO_ON_FALSE(len <= max_len, ESP_ERR_INVALID_SIZE, out, TAG,
-                          "Notification of %zu bytes exceeds ATT MTU - 3 (%zu bytes)", len, max_len);
-
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(text, len);
-        ESP_GOTO_ON_FALSE(om != NULL, ESP_ERR_NO_MEM, out, TAG, "No mbuf for notification");
-
-        int rc = ble_gatts_notify_custom(conn, chr->val_handle, om);
-        if (rc != BLE_HS_ENOMEM || attempt == NOTIFY_SEND_ATTEMPTS) {
-            ESP_GOTO_ON_FALSE(rc == 0, nimble_to_esp(rc), out, TAG, "Failed to send notification: %d", rc);
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(NOTIFY_RETRY_DELAY_MS));
+    if (err != ESP_OK && hal_ble_session_is_current(session)) {
+        ESP_LOGW(TAG, "Ending the connection whose reply was not sent: %s", esp_err_to_name(err));
+        request_end(session);
     }
-
-out:
-    cJSON_Delete(json);
-    return ret;
+    return err;
 }
 
 esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_ble_wifi_scan_result_t *results,
                                          size_t count)
 {
-    ESP_RETURN_ON_FALSE(atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(atomic_load(&s_stage) == BLE_STAGE_RUNNING, ESP_ERR_INVALID_STATE, TAG, "not initialized");
     ESP_RETURN_ON_FALSE(results != NULL || count == 0, ESP_ERR_INVALID_ARG, TAG, "results is NULL");
     ESP_RETURN_ON_FALSE(hal_ble_session_is_current(session), ESP_ERR_INVALID_STATE, TAG,
                         "The client that asked for the scan is gone");
@@ -728,7 +762,7 @@ esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_bl
                      cJSON_AddNumberToObject(item, "rssi", results[i].rssi) &&
                      cJSON_AddStringToObject(item, "sec", results[i].security) &&
                      cJSON_AddNumberToObject(item, "ch", results[i].channel);
-        esp_err_t err = notify_json(&s_wifi_scan, session, item, built);
+        esp_err_t err = ble_notify_json(&s_wifi_scan, session, item, built);
         if (err == ESP_ERR_INVALID_SIZE) {
             skipped++;
             continue;
@@ -741,13 +775,16 @@ esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_bl
         }
         sent++;
     }
+    if (first_err == ESP_ERR_TIMEOUT) {
+        return end_session_on_failure(session, first_err);
+    }
 
     cJSON *done = cJSON_CreateObject();
     bool built = done != NULL &&
                  cJSON_AddTrueToObject(done, "done") &&
                  cJSON_AddNumberToObject(done, "count", (double)sent) &&
                  cJSON_AddNumberToObject(done, "skipped", (double)skipped);
-    esp_err_t done_err = notify_json(&s_wifi_scan, session, done, built);
+    esp_err_t done_err = end_session_on_failure(session, ble_notify_json(&s_wifi_scan, session, done, built));
     if (first_err != ESP_OK) {
         return first_err;
     }
@@ -760,49 +797,46 @@ esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_bl
 esp_err_t hal_ble_send_wifi_config_result(hal_ble_session_t session, bool success, const char *ip_addr,
                                           const char *message)
 {
-    ESP_RETURN_ON_FALSE(atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(atomic_load(&s_stage) == BLE_STAGE_RUNNING, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
     cJSON *json = cJSON_CreateObject();
     bool built = json != NULL &&
                  cJSON_AddBoolToObject(json, "success", success) &&
                  cJSON_AddStringToObject(json, "ip", ip_addr ? ip_addr : "") &&
                  cJSON_AddStringToObject(json, "msg", message ? message : "");
-    return notify_json(&s_wifi_config, session, json, built);
+    return end_session_on_failure(session, ble_notify_json(&s_wifi_config, session, json, built));
 }
 
 esp_err_t hal_ble_send_url_set_result(hal_ble_session_t session, bool success, int32_t code, const char *message)
 {
-    ESP_RETURN_ON_FALSE(atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(atomic_load(&s_stage) == BLE_STAGE_RUNNING, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
     cJSON *json = cJSON_CreateObject();
     bool built = json != NULL &&
                  cJSON_AddBoolToObject(json, "success", success) &&
                  cJSON_AddNumberToObject(json, "code", code) &&
                  cJSON_AddStringToObject(json, "message", message ? message : "");
-    return notify_json(&s_url_set, session, json, built);
+    return end_session_on_failure(session, ble_notify_json(&s_url_set, session, json, built));
 }
 
 esp_err_t hal_ble_deinit(void)
 {
-    if (!atomic_load(&s_initialized)) {
+    ble_stage_t stage = atomic_load(&s_stage);
+    if (stage == BLE_STAGE_OFF) {
         return ESP_OK;
     }
+    ESP_RETURN_ON_FALSE(stage == BLE_STAGE_RUNNING, ESP_FAIL, TAG, "The NimBLE port failed to deinit before");
 
-    hal_ble_stop_advertising();
-    hal_ble_disconnect();
-    atomic_store(&s_session, HAL_BLE_SESSION_NONE);
-
+    ble_notify_set_accepting(false);
     int rc = nimble_port_stop();
     if (rc != 0) {
-        ESP_LOGW(TAG, "Failed to stop NimBLE port: %d", rc);
+        ble_notify_set_accepting(true);
+        ESP_LOGE(TAG, "The NimBLE host did not stop: %d", rc);
+        return ESP_FAIL;
     }
-
-    rc = nimble_port_deinit();
-    if (rc != 0) {
-        ESP_LOGW(TAG, "Failed to deinit NimBLE port: %d", rc);
-    }
-
-    atomic_store(&s_initialized, false);
+    atomic_store(&s_adv_wanted, false);
+    forget_connection();
+    ESP_RETURN_ON_ERROR(release_host_not_running(ESP_OK), TAG, "BLE deinit failed");
     ESP_LOGI(TAG, "BLE HAL deinitialized");
     return ESP_OK;
 }

@@ -10,3 +10,4 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t wait);
 BaseType_t xSemaphoreGive(SemaphoreHandle_t s);
 void vSemaphoreDelete(SemaphoreHandle_t s);
 SemaphoreHandle_t xSemaphoreCreateBinary(void);
+SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t *buf);

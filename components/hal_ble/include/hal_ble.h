@@ -36,14 +36,17 @@
  * writes to it, and a write without them fails with ATT error 0xFD (Client
  * Characteristic Configuration Descriptor Improperly Configured). A send on a
  * characteristic whose notifications the client turned off later fails with
- * ESP_ERR_INVALID_STATE. The client must request an ATT MTU of at least 100
- * bytes, and a write on a link with a smaller MTU fails with ATT error 0xFC
- * (Write Request Rejected). The device cannot start the MTU exchange itself,
- * because the NimBLE GATT client needs the central role, which this firmware
- * turns off. A write the application cannot queue fails with ATT error 0x11
- * (Insufficient Resources). An acknowledged write gets its reply, except a
- * repeated WIFI_SCAN from the same session while its scan runs and a
- * WIFI_CONFIG whose connect attempt a short press ends.
+ * ESP_ERR_INVALID_STATE and ends the connection. The client must request an
+ * ATT MTU of at least 100 bytes, and a write on a link with a smaller MTU
+ * fails with ATT error 0xFC (Write Request Rejected). The device cannot start
+ * the MTU exchange itself, because the NimBLE GATT client needs the central
+ * role, which this firmware turns off. A write the application cannot queue
+ * fails with ATT error 0x11 (Insufficient Resources). An acknowledged write
+ * gets its reply or the end of its connection, except a repeated WIFI_SCAN
+ * from the same session while its scan runs and a WIFI_CONFIG whose connect
+ * attempt a short press ends. A request whose client disconnects before the
+ * application handles it starts nothing and gets no reply. A sent reply means
+ * the NimBLE stack accepted the notification, not that the phone received it.
  *
  * Writes are limited to 200 bytes. A write that is empty or over that limit
  * fails with ATT error 0x0D (Invalid Attribute Value Length). So does a
@@ -70,10 +73,18 @@
  *   JSON did not fit in ATT MTU - 3 bytes or a send failed. count + skipped
  *   is the number of networks found. An empty scan sends only the
  *   terminator with count 0. The client treats the scan as complete on "done".
+ *   When the stack does not take a network notification within 250 ms, the
+ *   device sends no terminator and ends the connection.
  * - WIFI_CONFIG: {"success":bool,"ip":"..","msg":".."} after the connect
  *   attempt.
  * - URL_SET: {"success":bool,"code":int,"message":".."} after the SDM
  *   provisioning attempt.
+ *
+ * The 250 ms limits count from the moment the NimBLE host queue takes the
+ * request. The NimBLE port waits without a limit for a free slot in that
+ * queue (npl_os_freertos.c, npl_freertos_eventq_put) and offers no call that
+ * returns at once, so a stalled host with a full queue blocks the caller
+ * longer.
  */
 
 #ifndef HAL_BLE_H
@@ -94,10 +105,12 @@ extern "C" {
 /**
  * @brief One BLE connection
  *
- * Every request carries the session of the connection that sent it. A reply
- * sent with that session reaches only that connection, never a client that
- * connected later. The device checks the session right before each send, so
- * only a reconnect within those few instructions could still receive it.
+ * Every request carries the session of the connection that sent it. Each
+ * connection gets a new session number, and no number repeats within one
+ * boot. A reply sent with a session reaches only that connection, never a
+ * client that connected later, even on the same connection handle: the NimBLE
+ * host task checks the session and submits the notification in one step, so
+ * no connect or disconnect event runs in between.
  */
 typedef uint32_t hal_ble_session_t;
 
@@ -158,8 +171,9 @@ typedef esp_err_t (*hal_ble_event_cb_t)(hal_ble_event_t event, hal_ble_session_t
  *
  * @param event_cb Event callback, must not be NULL
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG for a NULL callback,
- *         ESP_ERR_INVALID_STATE when already initialized, another error code
- *         otherwise
+ *         ESP_ERR_INVALID_STATE when already initialized or after a failed
+ *         port deinit, ESP_ERR_NO_MEM when the NimBLE port has no timer left,
+ *         another error code otherwise
  */
 esp_err_t hal_ble_init(hal_ble_event_cb_t event_cb);
 
@@ -199,11 +213,12 @@ esp_err_t hal_ble_stop_advertising(void);
 /**
  * @brief Disconnect the connected client
  *
- * Returns ESP_OK at once when no client is connected. The link ends after the
- * call returns, and a notification sent just before may not reach the client.
- * Advertising resumes after the disconnect when it is still requested.
+ * The NimBLE host task ends the link of the client connected at the call,
+ * after the call returns, and a notification sent just before may not reach
+ * the client. A client that connects later stays connected. Advertising
+ * resumes after the disconnect when it is still requested.
  *
- * @return ESP_OK, or an error code when the disconnect request failed
+ * @return ESP_OK
  */
 esp_err_t hal_ble_disconnect(void);
 
@@ -219,15 +234,20 @@ bool hal_ble_session_is_current(hal_ble_session_t session);
  * @brief Send WiFi scan results to the client that asked for them
  *
  * Sends one WIFI_SCAN notification per network and a final terminator (see
- * the notification formats above). Do not call from the event callback.
+ * the notification formats above). Each notification waits up to 250 ms for
+ * the NimBLE host task. Do not call from the event callback or the host task.
  *
  * @param session Session of the WIFI_SCAN request
  * @param results Array of scan results, may be NULL when count is 0
  * @param count Number of results in array, 0 reports an empty scan
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone or
  *         has notifications off, ESP_ERR_INVALID_SIZE when the MTU is
- *         too small for the terminator, the first send error otherwise. The
- *         terminator is sent even after a failed result.
+ *         too small for the terminator, ESP_ERR_NO_MEM when the stack has no
+ *         buffer or every notification job is in use, ESP_ERR_TIMEOUT when
+ *         the host task did not answer in time, the first send error
+ *         otherwise. The terminator is sent after a failed result, except
+ *         after ESP_ERR_TIMEOUT. When the terminator is not sent, the device
+ *         ends the connection if it still lasts.
  */
 esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_ble_wifi_scan_result_t *results,
                                          size_t count);
@@ -235,11 +255,16 @@ esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_bl
 /**
  * @brief Send the WiFi configuration result to the client that sent it
  *
+ * Waits up to 250 ms for the NimBLE host task. When the result is not sent
+ * and the connection still lasts, the device ends it.
+ *
  * @param session Session of the WIFI_CONFIG request
  * @param success true if WiFi connected successfully
  * @param ip_addr IP address if connected (NULL sends "")
  * @param message Status message
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone,
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone
+ *         or has notifications off, ESP_ERR_NO_MEM when the stack has no
+ *         buffer, ESP_ERR_TIMEOUT when the host task did not answer in time,
  *         another error code otherwise
  */
 esp_err_t hal_ble_send_wifi_config_result(hal_ble_session_t session, bool success, const char *ip_addr,
@@ -251,11 +276,16 @@ esp_err_t hal_ble_send_wifi_config_result(hal_ble_session_t session, bool succes
  * Payload is a compact JSON object:
  * {"success":bool,"code":int,"message":"..."}
  *
+ * Waits up to 250 ms for the NimBLE host task. When the result is not sent
+ * and the connection still lasts, the device ends it.
+ *
  * @param session Session of the URL_SET request
  * @param success true if SDM configured successfully
  * @param code Stable application-facing result code
  * @param message Human-readable result message
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone,
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE when that client is gone
+ *         or has notifications off, ESP_ERR_NO_MEM when the stack has no
+ *         buffer, ESP_ERR_TIMEOUT when the host task did not answer in time,
  *         another error code otherwise
  */
 esp_err_t hal_ble_send_url_set_result(hal_ble_session_t session, bool success, int32_t code, const char *message);
@@ -263,10 +293,19 @@ esp_err_t hal_ble_send_url_set_result(hal_ble_session_t session, bool success, i
 /**
  * @brief Deinitialize the BLE subsystem
  *
- * Stops advertising, disconnects clients, and frees resources. Do not call it
- * while a hal_ble_send_*() call runs on another task.
+ * Stops the NimBLE host task, which stops advertising and ends the
+ * connection, and frees resources. Do not call it while a hal_ble_send_*()
+ * call runs on another task. When the host task does not stop, BLE keeps
+ * working and the call can be repeated. When the host task stopped but the
+ * NimBLE port does not deinit, BLE stays off until restart: the NimBLE port
+ * cannot run its deinit twice, so a repeated call returns ESP_FAIL at once.
+ * hal_ble_init(), the two advertising calls and the three send calls then
+ * return ESP_ERR_INVALID_STATE; hal_ble_set_device_id() and
+ * hal_ble_disconnect() return ESP_OK and hal_ble_session_is_current() returns
+ * false, as after a successful deinit.
  *
- * @return ESP_OK on success, error code otherwise
+ * @return ESP_OK on success, ESP_FAIL when the host task did not stop or the
+ *         port did not deinit now or before
  */
 esp_err_t hal_ble_deinit(void);
 

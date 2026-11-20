@@ -12,6 +12,7 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "host/ble_hs.h"
 
 extern int64_t host_now_us;
 
@@ -34,6 +35,8 @@ extern int wifi_connect_calls;
 extern int wifi_disconnect_calls;
 extern esp_err_t wifi_connect_result;
 extern esp_err_t wifi_disconnect_result;
+extern esp_err_t wifi_stop_result;
+extern esp_err_t wifi_deinit_result;
 extern int host_event_post_fails;
 
 #define HOST_NOTIFY_MAX 16
@@ -41,10 +44,34 @@ extern int host_event_post_fails;
 extern uint16_t host_mtu;
 extern int host_notify_count;
 extern char host_notify_payload[HOST_NOTIFY_MAX][HOST_NOTIFY_LEN];
+extern int host_notify_conn[HOST_NOTIFY_MAX];
 extern int host_notify_fail_at;
 extern bool host_notify_enomem_once;
+extern bool host_notify_enomem_always;
 extern void (*host_on_enomem)(void);
+extern void (*host_before_alloc)(void);
+extern int host_stalled_waits;
+extern int host_conn_id;
+extern int host_terminations;
+extern int host_mbuf_live;
+extern int host_port_stop_rc;
+extern int host_port_deinit_rc;
+extern int host_callout_init_rc;
+extern int host_add_svcs_rc;
+extern int host_callouts_released_armed;
+extern int64_t host_put_delay_us;
+extern int host_adv_starts;
+extern int host_terminate_rc;
+int host_fire_callouts(void);
+extern int host_notify_calls;
+extern void (*host_on_enomem_always)(void);
 void host_notify_reset(void);
+void host_run_host(void);
+void host_post_gap(ble_gap_event_fn *fn, struct ble_gap_event ev);
+
+extern bool host_in_host;
+extern bool host_blocked_in_host;
+extern void (*host_on_block)(void);
 
 extern jmp_buf host_hang_jmp;
 extern bool host_hang_armed;

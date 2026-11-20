@@ -36,6 +36,10 @@ static const char *TAG = "app_state";
 #define STATE_TASK_POLL_MS          5000
 #define FACTORY_RESET_FEEDBACK_MS   1500
 #define QUEUE_OVERFLOW_THRESHOLD    3
+/* Chosen, not from a source: deep sleep powers the radios down even when they did not stop (ESP-IDF v6.1 sleep
+ * modes guide, "Wi-Fi/Bluetooth and Sleep Modes"), so a radio that refuses to stop delays the sleep by only this many
+ * state task passes. */
+#define RADIO_STOP_ATTEMPTS         3
 
 typedef enum {
     APP_STATE_INIT,
@@ -89,6 +93,7 @@ static const char *const s_event_names[APP_EVENT_COUNT] = {
 /* Only the state task reads or writes these. */
 static app_state_t s_state = APP_STATE_INIT;
 static bool s_critical_battery_pending;  /* A tag write or a scan postponed the deep sleep */
+static int s_radio_stop_failures;
 static bool s_low_battery_pending;       /* The warning came outside IDLE */
 static hal_ble_session_t s_wifi_session = HAL_BLE_SESSION_NONE;  /* The client waiting for the WiFi result */
 
@@ -373,8 +378,20 @@ static void power_down_when_idle(void)
     }
     ESP_LOGW(TAG, "Critical battery, entering deep sleep");
     hal_time_stop_sync();
-    hal_ble_deinit();
-    hal_network_deinit();
+    esp_err_t ble_err = hal_ble_deinit();
+    esp_err_t net_err = hal_network_deinit();
+    esp_err_t err = ble_err != ESP_OK ? ble_err : net_err;
+    if (err != ESP_OK && ++s_radio_stop_failures < RADIO_STOP_ATTEMPTS) {
+        if (!s_critical_battery_pending) {
+            ESP_LOGE(TAG, "Deep sleep postponed: stopping the radios failed: %s", esp_err_to_name(err));
+        }
+        s_critical_battery_pending = true;
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "The radios did not stop in %d attempts, sleeping anyway: %s", RADIO_STOP_ATTEMPTS,
+                 esp_err_to_name(err));
+    }
     hal_power_deep_sleep();
 }
 
@@ -544,6 +561,10 @@ static void dispatch_event(const event_msg_t *msg, const void *data, size_t data
     case APP_EVENT_WIFI_CONFIG_RECEIVED:
     case APP_EVENT_URL_SET:
     case APP_EVENT_WIFI_SCAN_REQUESTED: {
+        if (!hal_ble_session_is_current(msg->session)) {
+            ESP_LOGW(TAG, "%s dropped: the client that sent it is gone", s_event_names[msg->event]);
+            return;
+        }
         const char *refusal = request_refusal();
         if (refusal != NULL) {
             ESP_LOGW(TAG, "%s rejected in state %s: %s", s_event_names[msg->event], s_state_names[s_state], refusal);
@@ -576,33 +597,39 @@ static void handle_event(const event_msg_t *msg)
     } else {
         dispatch_event(msg, msg->data, msg->data_len);
     }
-    if (s_critical_battery_pending) {
+    if (s_critical_battery_pending && msg->event != APP_EVENT_CRITICAL_BATTERY) {
         power_down_when_idle();
     }
+}
+
+static void state_task_poll(void)
+{
+    event_msg_t msg;
+    if (xQueueReceive(s_event_queue, &msg, pdMS_TO_TICKS(STATE_TASK_POLL_MS)) == pdTRUE) {
+        handle_event(&msg);
+
+        /* A tag write must end through URL_SET_DONE, so the alarm waits for it. */
+        if (s_state != APP_STATE_WRITING_TAG && atomic_exchange(&s_overflow_alarm, false)) {
+            ESP_LOGE(TAG, "Event queue overflowed %d times in a row, entering ERROR state",
+                     QUEUE_OVERFLOW_THRESHOLD);
+            transition_to(APP_STATE_ERROR, APP_EVENT_COUNT);
+        }
+    } else if (s_critical_battery_pending) {
+        power_down_when_idle();
+    }
+    esp_task_wdt_reset();
 }
 
 static void state_machine_task(void *arg)
 {
     (void)arg;
-    event_msg_t msg;
-
     esp_err_t err = esp_task_wdt_add(NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to subscribe to the task watchdog: %s", esp_err_to_name(err));
     }
 
     while (1) {
-        if (xQueueReceive(s_event_queue, &msg, pdMS_TO_TICKS(STATE_TASK_POLL_MS)) == pdTRUE) {
-            handle_event(&msg);
-
-            /* A tag write must end through URL_SET_DONE, so the alarm waits for it. */
-            if (s_state != APP_STATE_WRITING_TAG && atomic_exchange(&s_overflow_alarm, false)) {
-                ESP_LOGE(TAG, "Event queue overflowed %d times in a row, entering ERROR state",
-                         QUEUE_OVERFLOW_THRESHOLD);
-                transition_to(APP_STATE_ERROR, APP_EVENT_COUNT);
-            }
-        }
-        esp_task_wdt_reset();
+        state_task_poll();
     }
 }
 

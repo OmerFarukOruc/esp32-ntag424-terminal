@@ -73,6 +73,7 @@ The last four lines can appear in another order, because the state task runs as 
 | Check | Expected | Status |
 |-------|----------|--------|
 | No error lines during init | No `E` lines from `app_state`, `hal_nfc`, `hal_ble`, or `main` | [ ] |
+| NimBLE event pool | `BLE HAL initialized` appears and no assert or reboot follows. `hal_ble_init` takes 7 NimBLE events and 1 callout from the port's pool, which aborts at boot when it runs out. | [ ] |
 | Init order | The indicator comes first, then diagnostics, NFC, network, button, and BLE | [ ] |
 | LED | White pulse, 2 s cycle (idle, WiFi disconnected) | [ ] |
 | No boot beep | The buzzer stays silent | [ ] |
@@ -292,6 +293,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | WIFI_CONFIG during the write | Notification `{"success":false,"ip":"","msg":"WiFi connection failed"}`, log `WiFi config rejected: a tag write is running`, and the write goes on | [ ] |
 | Disconnect the BLE client during the write | The write still ends, log `URL_SET attempt #<n>: BLE disconnected before the result, not sent` | [ ] |
 | Disconnect and connect again during the write | Connect again, pair, and enable notifications on URL_SET before the write ends. No URL_SET result reaches the new connection, and the log shows the line of the row above. | [ ] |
+| Notifications off before the result | Turn notifications on URL_SET off during the write. When the write ends, the log shows `Ending the connection whose reply was not sent: <error>` and the phone link ends | [ ] |
 | Short press or 3 s hold during the write | Nothing changes. The state stays WRITING_TAG until the write ends. | [ ] |
 | Hold the button 10 s during the write | `Factory reset refused: a tag write is running` | [ ] |
 
@@ -456,6 +458,7 @@ The monitor samples every 30 s. Raise or lower the supply to test the levels.
 | Critical (below 3100 mV) | Two readings in a row, 30 s apart, give `hal_power: Battery level changed: <old> -> 0`, `Critical battery, entering deep sleep`, and `hal_power: Entering deep sleep`. BLE, WiFi, and SNTP stop first. Only a reset or a power cycle wakes the device. | [ ] |
 | Critical during a tag write | `Deep sleep postponed: a tag write is running`. The device sleeps after the write result. | [ ] |
 | Critical during a WiFi scan | `Deep sleep postponed: a scan is running`. The device sleeps after the scan terminator. | [ ] |
+| Radio that does not stop | Not reproducible without a fault. The code logs `Deep sleep postponed: stopping the radios failed`, retries on the next two 5 s polls, then logs `The radios did not stop in 3 attempts, sleeping anyway` and sleeps. | [ ] |
 | New request while the sleep waits | During a postponed sleep, a WIFI_SCAN gets the empty terminator, a URL_SET gets code 1099 `low_battery`, and a WIFI_CONFIG gets the failure notification, each with the log `<event> rejected in state <state>: low_battery` | [ ] |
 
 The level numbers in the log are 0 critical, 1 low, 2 medium, and 3 normal.

@@ -32,9 +32,18 @@ static void reset(app_state_t state)
     s_event_queue = xQueueCreate(EVENT_QUEUE_SIZE, sizeof(event_msg_t));
     s_state = state;
     s_critical_battery_pending = false;
+    s_radio_stop_failures = 0;
     host_run_tasks();
     drain();
     memset(&trace, 0, sizeof trace);
+    trace.ble_current = SESSION_A;
+}
+
+static void poll_state_task(void)
+{
+    if (!setjmp(host_sleep_jmp)) {
+        state_task_poll();
+    }
 }
 
 static bool url_reply_is(bool ok, int32_t code, const char *msg)
@@ -69,7 +78,7 @@ int main(void)
     esp_err_t ack;
 
     reset(APP_STATE_ONBOARDING_BLE);
-    app_post_event(APP_EVENT_WIFI_SCAN_REQUESTED, NULL, 0);
+    post_event(APP_EVENT_WIFI_SCAN_REQUESTED, SESSION_A, NULL, 0, 0);
     drain();
     app_post_event(APP_EVENT_CRITICAL_BATTERY, NULL, 0);
     drain();
@@ -93,6 +102,7 @@ int main(void)
     app_post_event(APP_EVENT_CRITICAL_BATTERY, NULL, 0);
     drain();
     trace.nfc_result = HAL_NFC_OK;
+    trace.ble_current = SESSION_B;
     url_set(SESSION_B);
     drain();
     int writing = s_state == APP_STATE_WRITING_TAG;
@@ -235,6 +245,7 @@ int main(void)
     post_event(APP_EVENT_WIFI_SCAN_REQUESTED, SESSION_A, NULL, 0, 0);
     drain();
     int same = trace.scan_sends;
+    trace.ble_current = SESSION_B;
     post_event(APP_EVENT_WIFI_SCAN_REQUESTED, SESSION_B, NULL, 0, 0);
     drain();
     int while_running = trace.scan_sends;
@@ -251,6 +262,74 @@ int main(void)
           to_a->session == SESSION_A && to_a->count == 1 && strcmp(to_a->first.ssid, host_scan_ap.ssid) == 0 &&
           to_a->first.rssi == host_scan_ap.rssi && to_a->first.channel == host_scan_ap.channel &&
           strcmp(to_a->first.security, "WPA3") == 0, d);
+    static const struct {
+        const char *name;
+        app_event_t event;
+    } stale[] = {
+        { "a URL_SET queued by a client that left starts no tag write and gets no reply", APP_EVENT_URL_SET },
+        { "a WIFI_CONFIG queued by a client that left connects nowhere, leaves no credentials and gets no reply", APP_EVENT_WIFI_CONFIG_RECEIVED },
+        { "a WIFI_SCAN queued by a client that left starts no scan and gets no reply", APP_EVENT_WIFI_SCAN_REQUESTED },
+    };
+    for (size_t i = 0; i < sizeof stale / sizeof stale[0]; i++) {
+        reset(APP_STATE_ONBOARDING_BLE);
+        trace.nfc_result = HAL_NFC_OK;
+        if (stale[i].event == APP_EVENT_URL_SET) {
+            url_set(SESSION_A);
+        } else if (stale[i].event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
+            write_wifi_config(SESSION_A, "HomeNet", "SECRETPASSWORD1", &ack);
+        } else {
+            post_event(APP_EVENT_WIFI_SCAN_REQUESTED, SESSION_A, NULL, 0, 0);
+        }
+        trace.ble_current = SESSION_B;
+        drain();
+        host_run_tasks();
+        drain();
+        int left = memmem(&s_wifi_slot, sizeof s_wifi_slot, "SECRETPASSWORD1", 15) != NULL;
+        snprintf(d, sizeof d, "tag writes=%d connects=%d scans=%d, replies url/wifi/scan=%d/%d/%d, password in the slot=%d",
+                 trace.nfc_writes, trace.connects, trace.scans, trace.url_results, trace.wifi_results,
+                 trace.scan_sends, left);
+        check(stale[i].name, trace.nfc_writes == 0 && trace.connects == 0 && trace.scans == 0 && trace.url_results == 0 &&
+              trace.wifi_results == 0 && trace.scan_sends == 0 && !left, d);
+    }
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    trace.ble_deinit_err = ESP_FAIL;
+    app_post_event(APP_EVENT_CRITICAL_BATTERY, NULL, 0);
+    drain();
+    int slept_while_ble_up = trace.slept;
+    int wifi_stops_while_ble_up = trace.net_deinit;
+    trace.ble_deinit_err = ESP_OK;
+    poll_state_task();
+    snprintf(d, sizeof d, "slept while BLE did not stop=%d, WiFi stop attempts meanwhile=%d, BLE stop attempts=%d, "
+             "slept after the next poll=%d", slept_while_ble_up, wifi_stops_while_ble_up, trace.ble_deinit,
+             trace.slept);
+    check("critical battery sleeps only after BLE stops, stops WiFi meanwhile, and the state task retries",
+          slept_while_ble_up == 0 && wifi_stops_while_ble_up == 1 && trace.slept == 1, d);
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    trace.ble_deinit_err = ESP_FAIL;
+    app_post_event(APP_EVENT_CRITICAL_BATTERY, NULL, 0);
+    drain();
+    poll_state_task();
+    int slept_after_two = trace.slept;
+    poll_state_task();
+    trace.ble_deinit_err = ESP_OK;
+    snprintf(d, sizeof d, "slept after 2 failed stops=%d, after the 3rd=%d, BLE stop attempts=%d", slept_after_two,
+             trace.slept, trace.ble_deinit);
+    check("critical battery sleeps after the 3rd failed radio stop anyway",
+          slept_after_two == 0 && trace.slept == 1 && trace.ble_deinit == 3, d);
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    trace.net_deinit_err = ESP_FAIL;
+    app_post_event(APP_EVENT_CRITICAL_BATTERY, NULL, 0);
+    drain();
+    int slept_while_wifi_up = trace.slept;
+    trace.net_deinit_err = ESP_OK;
+    poll_state_task();
+    snprintf(d, sizeof d, "slept while WiFi did not stop=%d, WiFi stop attempts=%d, slept after the next poll=%d",
+             slept_while_wifi_up, trace.net_deinit, trace.slept);
+    check("critical battery sleeps only after WiFi stops too",
+          slept_while_wifi_up == 0 && trace.net_deinit == 2 && trace.slept == 1, d);
     vQueueDelete(s_event_queue);
     return check_summary();
 }

@@ -160,6 +160,33 @@ int main(void)
     check("new credentials that fail 3 times end in DISCONNECTED with no retry",
           wifi_connect_calls == 3 && hal_wifi_get_state() == HAL_WIFI_STATE_DISCONNECTED && !reconnect_timer->armed, d);
 
+    start();
+    wifi_stop_result = ESP_FAIL;
+    esp_err_t stop_failed = hal_network_deinit();
+    esp_err_t init_while_pending = hal_network_init();
+    wifi_stop_result = ESP_OK;
+    esp_err_t retried = hal_network_deinit();
+    esp_err_t init_after = hal_network_init();
+    snprintf(d, sizeof d, "deinit while WiFi does not stop=%s, init meanwhile=%s, deinit retry=%s, init after it=%s",
+             esp_err_to_name(stop_failed), esp_err_to_name(init_while_pending), esp_err_to_name(retried),
+             esp_err_to_name(init_after));
+    check("hal_network_deinit reports a WiFi driver that does not stop, and its retry finishes the teardown",
+          stop_failed == ESP_FAIL && init_while_pending == ESP_ERR_INVALID_STATE && retried == ESP_OK &&
+          init_after == ESP_OK, d);
+
+    wifi_deinit_result = ESP_ERR_NO_MEM;
+    esp_err_t deinit_failed = hal_network_deinit();
+    init_while_pending = hal_network_init();
+    wifi_deinit_result = ESP_OK;
+    retried = hal_network_deinit();
+    init_after = hal_network_init();
+    snprintf(d, sizeof d, "deinit while the WiFi driver does not deinit=%s, init meanwhile=%s, deinit retry=%s, init "
+             "after it=%s", esp_err_to_name(deinit_failed), esp_err_to_name(init_while_pending),
+             esp_err_to_name(retried), esp_err_to_name(init_after));
+    check("hal_network_deinit reports a WiFi driver that does not deinit, and its retry finishes the teardown",
+          deinit_failed == ESP_ERR_NO_MEM && init_while_pending == ESP_ERR_INVALID_STATE && retried == ESP_OK &&
+          init_after == ESP_OK, d);
+
     hal_network_deinit();
     return check_summary();
 }

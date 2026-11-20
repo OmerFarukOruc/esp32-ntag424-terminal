@@ -22,9 +22,12 @@ struct host_trace {
     esp_err_t nvs_commit_err;
     esp_err_t ble_set_id_err;
     char published_id[HAL_BLE_DEVICE_ID_MAX];
+    hal_ble_session_t ble_current;
+    esp_err_t ble_deinit_err;
     int ble_deinit;
     int ble_deinit_with_tasks;
     int net_deinit;
+    esp_err_t net_deinit_err;
     int net_deinit_with_tasks;
     int slept;
     int scan_sends;
@@ -39,6 +42,8 @@ struct host_trace {
     char last_url_msg[64];
     int32_t diag_result_code;
     int connects;
+    int scans;
+    int nfc_writes;
     esp_err_t connect_err;
     hal_wifi_state_t wifi_state;
     hal_wifi_credentials_t last_creds;
