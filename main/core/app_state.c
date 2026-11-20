@@ -37,6 +37,7 @@ static const char *TAG = "app_state";
 #define WIFI_ATTEMPT_POLL_MS        100
 #define FACTORY_RESET_FEEDBACK_MS   1500
 #define QUEUE_OVERFLOW_THRESHOLD    3
+#define TRANSITION_CAUSE_NONE       APP_EVENT_COUNT
 /* Chosen, not from a source: deep sleep powers the radios down even when they did not stop (ESP-IDF v6.1 sleep
  * modes guide, "Wi-Fi/Bluetooth and Sleep Modes"), so a radio that refuses to stop delays the sleep by only this many
  * state task passes. */
@@ -55,12 +56,13 @@ typedef enum {
 
 typedef struct {
     app_event_t event;
-    hal_ble_session_t session;  /* The BLE client of a request, HAL_BLE_SESSION_NONE for other events */
+    hal_ble_session_t session;
     size_t data_len;
     uint8_t data[EVENT_DATA_MAX];
 } event_msg_t;
 
 _Static_assert(EVENT_DATA_MAX >= sizeof(hal_nfc_err_t), "event data must hold a tag write result");
+_Static_assert(EVENT_DATA_MAX >= sizeof(bool), "event data must hold the boot fault flag");
 _Static_assert(APP_STATE_COUNT <= UINT8_MAX && APP_EVENT_COUNT <= UINT8_MAX,
                "hal_diagnostics stores states and events in one byte");
 
@@ -91,16 +93,16 @@ static const char *const s_event_names[APP_EVENT_COUNT] = {
     [APP_EVENT_CRITICAL_BATTERY] = "CRITICAL_BATTERY",
 };
 
-/* Only the state task reads or writes these. */
-static app_state_t s_state = APP_STATE_INIT;
-static bool s_critical_battery_pending;  /* A tag write or a scan postponed the deep sleep */
-static int s_radio_stop_failures;
-static bool s_low_battery_pending;       /* The warning came outside IDLE */
-static hal_ble_session_t s_wifi_session = HAL_BLE_SESSION_NONE;  /* The client waiting for the WiFi result */
-static hal_wifi_attempt_id_t s_wifi_attempt;
+static struct {
+    app_state_t state;
+    bool deep_sleep_postponed;
+    int radio_stop_failures;
+    bool low_battery_warning_deferred;
+    hal_ble_session_t wifi_result_client;
+    hal_wifi_attempt_id_t wifi_attempt;
+} s_state_task = {.state = APP_STATE_INIT, .wifi_result_client = HAL_BLE_SESSION_NONE};
 
 static QueueHandle_t s_event_queue;
-static bool s_boot_fault;  /* Written before INIT_COMPLETE is queued, read by the state task after */
 static atomic_uint s_consecutive_overflows;
 static atomic_bool s_overflow_alarm;
 
@@ -138,7 +140,7 @@ static esp_err_t post_event(app_event_t event, hal_ble_session_t session, const 
 }
 
 /* WiFi credentials skip the event queue, because a FreeRTOS queue keeps a copy of each item in its
- * storage after xQueueReceive(). One slot holds the credentials until the state task takes them. */
+ * storage after xQueueReceive(). */
 static struct {
     portMUX_TYPE lock;
     bool full;
@@ -157,7 +159,6 @@ static void wipe_wifi_slot(void)
     portEXIT_CRITICAL(&s_wifi_slot.lock);
 }
 
-/** Moves the waiting credentials into creds and empties the slot. */
 static void take_wifi_credentials(hal_wifi_credentials_t *creds)
 {
     portENTER_CRITICAL(&s_wifi_slot.lock);
@@ -242,7 +243,6 @@ static esp_err_t button_callback(hal_button_event_t event, uint32_t hold_time_ms
     return ret;
 }
 
-/* Runs on the system event task: it only queues the change for the state task. */
 static void wifi_event_callback(hal_wifi_state_t state)
 {
     switch (state) {
@@ -259,7 +259,6 @@ static void wifi_event_callback(hal_wifi_state_t state)
     }
 }
 
-/* Runs on the NimBLE host task: it only queues the request for the state task. */
 static esp_err_t ble_event_callback(hal_ble_event_t event, hal_ble_session_t session, const void *data,
                                     size_t data_len)
 {
@@ -302,14 +301,17 @@ static void enter_idle(void)
     }
 }
 
+static void disconnect_stale_client_then_advertise(void)
+{
+    ESP_ERROR_CHECK_WITHOUT_ABORT(hal_ble_disconnect());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(hal_ble_start_advertising());
+}
+
 static void enter_onboarding(void)
 {
     set_led(LED_PATTERN_SCANNING);
     play(BUZZER_SOUND_TAG_DETECTED);
-    /* A client left from an earlier WiFi attempt holds the only connection slot. Advertising
-     * resumes when its disconnect event arrives. */
-    ESP_ERROR_CHECK_WITHOUT_ABORT(hal_ble_disconnect());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(hal_ble_start_advertising());
+    disconnect_stale_client_then_advertise();
     ESP_LOGI(TAG, "BLE onboarding mode active");
 }
 
@@ -327,64 +329,67 @@ static void enter_low_battery(void)
     ESP_LOGW(TAG, "Low battery warning");
 }
 
-/* A tag write belongs to the onboarding session: the client stays connected and advertising stays on. */
-static bool in_onboarding(app_state_t state)
+static bool in_onboarding_session(app_state_t state)
 {
     return state == APP_STATE_ONBOARDING_BLE || state == APP_STATE_WRITING_TAG;
+}
+
+static bool keeps_client_for_wifi_result(app_state_t new_state)
+{
+    return new_state == APP_STATE_CONNECTING_WIFI;
 }
 
 static void send_wifi_result(hal_ble_session_t session, bool success);
 
 static void answer_wifi_attempt_before_error(void)
 {
-    if (s_wifi_attempt != 0) {
-        send_wifi_result(s_wifi_session, hal_wifi_attempt_take(s_wifi_attempt) == HAL_WIFI_ATTEMPT_SUCCEEDED);
+    if (s_state_task.wifi_attempt != 0) {
+        bool success = hal_wifi_attempt_take(s_state_task.wifi_attempt) == HAL_WIFI_ATTEMPT_SUCCEEDED;
+        send_wifi_result(s_state_task.wifi_result_client, success);
     }
 }
 
 static void detach_wifi_attempt(void)
 {
-    hal_wifi_attempt_cancel(s_wifi_attempt);
-    s_wifi_attempt = 0;
-    s_wifi_session = HAL_BLE_SESSION_NONE;
+    hal_wifi_attempt_cancel(s_state_task.wifi_attempt);
+    s_state_task.wifi_attempt = 0;
+    s_state_task.wifi_result_client = HAL_BLE_SESSION_NONE;
 }
 
-/* The cause is the event that made the transition. APP_EVENT_COUNT marks a cause that is no event. */
 static void transition_to(app_state_t new_state, app_event_t cause)
 {
-    if (s_state == new_state) {
+    if (s_state_task.state == new_state) {
         return;
     }
 
-    app_state_t old_state = s_state;
+    app_state_t old_state = s_state_task.state;
     if (old_state == APP_STATE_CONNECTING_WIFI) {
         if (new_state == APP_STATE_ERROR) {
             answer_wifi_attempt_before_error();
         }
         detach_wifi_attempt();
     }
-    if (in_onboarding(old_state) && !in_onboarding(new_state)) {
+    if (in_onboarding_session(old_state) && !in_onboarding_session(new_state)) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(hal_ble_stop_advertising());
-        /* The client of a WiFi connect attempt stays connected so that it gets the result. */
-        if (new_state != APP_STATE_CONNECTING_WIFI) {
+        if (!keeps_client_for_wifi_result(new_state)) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(hal_ble_disconnect());
         }
     }
 
-    s_state = new_state;
+    s_state_task.state = new_state;
     ESP_LOGI(TAG, "State: %s -> %s", s_state_names[old_state], s_state_names[new_state]);
     hal_diagnostics_record_transition((uint8_t)old_state, (uint8_t)new_state, (uint8_t)cause);
 
     switch (new_state) {
     case APP_STATE_IDLE:
         enter_idle();
-        if (s_low_battery_pending) {
-            s_low_battery_pending = false;
+        if (s_state_task.low_battery_warning_deferred) {
+            s_state_task.low_battery_warning_deferred = false;
             transition_to(APP_STATE_LOW_BATTERY, cause);
         }
         break;
     case APP_STATE_ONBOARDING_BLE:
-        if (!in_onboarding(old_state)) {
+        if (!in_onboarding_session(old_state)) {
             enter_onboarding();
         }
         break;
@@ -415,16 +420,14 @@ static void factory_reset(void)
     esp_restart();
 }
 
-/* Critical battery: stop the radios and sleep. Only a reset wakes the device. A tag write or a scan
- * still uses them, so the sleep waits for the task to report back. */
 static void power_down_when_idle(void)
 {
-    if (s_state == APP_STATE_WRITING_TAG || app_wifi_scan_running()) {
-        if (!s_critical_battery_pending) {
+    if (s_state_task.state == APP_STATE_WRITING_TAG || app_wifi_scan_running()) {
+        if (!s_state_task.deep_sleep_postponed) {
             ESP_LOGW(TAG, "Deep sleep postponed: a %s is running",
-                     s_state == APP_STATE_WRITING_TAG ? "tag write" : "scan");
+                     s_state_task.state == APP_STATE_WRITING_TAG ? "tag write" : "scan");
         }
-        s_critical_battery_pending = true;
+        s_state_task.deep_sleep_postponed = true;
         return;
     }
     ESP_LOGW(TAG, "Critical battery, entering deep sleep");
@@ -432,11 +435,11 @@ static void power_down_when_idle(void)
     esp_err_t ble_err = hal_ble_deinit();
     esp_err_t net_err = hal_network_deinit();
     esp_err_t err = ble_err != ESP_OK ? ble_err : net_err;
-    if (err != ESP_OK && ++s_radio_stop_failures < RADIO_STOP_ATTEMPTS) {
-        if (!s_critical_battery_pending) {
+    if (err != ESP_OK && ++s_state_task.radio_stop_failures < RADIO_STOP_ATTEMPTS) {
+        if (!s_state_task.deep_sleep_postponed) {
             ESP_LOGE(TAG, "Deep sleep postponed: stopping the radios failed: %s", esp_err_to_name(err));
         }
-        s_critical_battery_pending = true;
+        s_state_task.deep_sleep_postponed = true;
         return;
     }
     if (err != ESP_OK) {
@@ -461,22 +464,22 @@ static void handle_wifi_config(hal_ble_session_t session, const hal_wifi_credent
         send_wifi_result(session, false);
         return;
     }
-    s_wifi_session = session;
-    s_wifi_attempt = attempt;
+    s_state_task.wifi_result_client = session;
+    s_state_task.wifi_attempt = attempt;
     transition_to(APP_STATE_CONNECTING_WIFI, APP_EVENT_WIFI_CONFIG_RECEIVED);
 }
 
 static void finish_wifi_attempt(void)
 {
-    if (s_wifi_attempt == 0) {
+    if (s_state_task.wifi_attempt == 0) {
         return;
     }
-    hal_wifi_attempt_status_t status = hal_wifi_attempt_take(s_wifi_attempt);
+    hal_wifi_attempt_status_t status = hal_wifi_attempt_take(s_state_task.wifi_attempt);
     if (status == HAL_WIFI_ATTEMPT_PENDING) {
         return;
     }
     bool success = status == HAL_WIFI_ATTEMPT_SUCCEEDED;
-    send_wifi_result(s_wifi_session, success);
+    send_wifi_result(s_state_task.wifi_result_client, success);
     transition_to(APP_STATE_IDLE, success ? APP_EVENT_WIFI_CONNECTED : APP_EVENT_WIFI_DISCONNECTED);
 }
 
@@ -486,7 +489,7 @@ static void finish_tag_write(const void *data)
     memcpy(&nfc_err, data, sizeof(nfc_err));
     bool success = app_url_set_finish(nfc_err);
 
-    if (s_state == APP_STATE_WRITING_TAG) {
+    if (s_state_task.state == APP_STATE_WRITING_TAG) {
         transition_to(APP_STATE_ONBOARDING_BLE, APP_EVENT_URL_SET_DONE);
         set_led(success ? LED_PATTERN_SUCCESS : LED_PATTERN_NETWORK_ERROR);
         play(success ? BUZZER_SOUND_SUCCESS : BUZZER_SOUND_NETWORK_ERROR);
@@ -495,10 +498,12 @@ static void finish_tag_write(const void *data)
 
 static void handle_state_event(app_event_t event, hal_ble_session_t session, const void *data, size_t data_len)
 {
-    switch (s_state) {
+    switch (s_state_task.state) {
     case APP_STATE_INIT:
         if (event == APP_EVENT_INIT_COMPLETE) {
-            transition_to(s_boot_fault ? APP_STATE_ERROR : APP_STATE_IDLE, event);
+            bool boot_fault;
+            memcpy(&boot_fault, data, sizeof(boot_fault));
+            transition_to(boot_fault ? APP_STATE_ERROR : APP_STATE_IDLE, event);
         }
         break;
 
@@ -572,11 +577,10 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
 
 static const char *request_refusal(app_event_t event)
 {
-    if (s_critical_battery_pending) {
+    if (s_state_task.deep_sleep_postponed) {
         return "low_battery";
     }
-    /* A client can stay connected after onboarding ends, so answer instead of dropping. */
-    if (s_state != APP_STATE_ONBOARDING_BLE && s_state != APP_STATE_WRITING_TAG) {
+    if (!in_onboarding_session(s_state_task.state)) {
         return "not_onboarding";
     }
     if (event == APP_EVENT_WIFI_CONFIG_RECEIVED && app_wifi_scan_running()) {
@@ -587,12 +591,11 @@ static const char *request_refusal(app_event_t event)
 
 static void dispatch_event(const event_msg_t *msg, const void *data, size_t data_len)
 {
-    ESP_LOGD(TAG, "Event %s in state %s", s_event_names[msg->event], s_state_names[s_state]);
+    ESP_LOGD(TAG, "Event %s in state %s", s_event_names[msg->event], s_state_names[s_state_task.state]);
 
-    /* These events act the same in every state. */
     switch (msg->event) {
     case APP_EVENT_BUTTON_HOLD_10S:
-        if (s_state == APP_STATE_WRITING_TAG) {
+        if (s_state_task.state == APP_STATE_WRITING_TAG) {
             ESP_LOGW(TAG, "Factory reset refused: a tag write is running");
         } else {
             factory_reset();
@@ -602,10 +605,10 @@ static void dispatch_event(const event_msg_t *msg, const void *data, size_t data
         power_down_when_idle();
         return;
     case APP_EVENT_LOW_BATTERY:
-        if (s_state == APP_STATE_IDLE) {
+        if (s_state_task.state == APP_STATE_IDLE) {
             transition_to(APP_STATE_LOW_BATTERY, msg->event);
-        } else if (s_state != APP_STATE_ERROR && s_state != APP_STATE_LOW_BATTERY) {
-            s_low_battery_pending = true;
+        } else if (s_state_task.state != APP_STATE_ERROR && s_state_task.state != APP_STATE_LOW_BATTERY) {
+            s_state_task.low_battery_warning_deferred = true;
         }
         return;
     case APP_EVENT_URL_SET_DONE:
@@ -626,13 +629,13 @@ static void dispatch_event(const event_msg_t *msg, const void *data, size_t data
         }
         const char *refusal = request_refusal(msg->event);
         if (refusal != NULL) {
-            ESP_LOGW(TAG, "%s rejected in state %s: %s", s_event_names[msg->event], s_state_names[s_state], refusal);
+            ESP_LOGW(TAG, "%s rejected in state %s: %s", s_event_names[msg->event],
+                     s_state_names[s_state_task.state], refusal);
             if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
                 send_wifi_result(msg->session, false);
             } else if (msg->event == APP_EVENT_URL_SET) {
                 app_url_set_reject(msg->session, refusal);
             } else {
-                /* An empty result still carries the done terminator the client waits for. */
                 hal_ble_send_wifi_scan_results(msg->session, NULL, 0);
             }
             return;
@@ -656,25 +659,29 @@ static void handle_event(const event_msg_t *msg)
     } else {
         dispatch_event(msg, msg->data, msg->data_len);
     }
-    if (s_critical_battery_pending && msg->event != APP_EVENT_CRITICAL_BATTERY) {
+    if (s_state_task.deep_sleep_postponed && msg->event != APP_EVENT_CRITICAL_BATTERY) {
         power_down_when_idle();
     }
+}
+
+static bool overflow_alarm_may_fire(void)
+{
+    return s_state_task.state != APP_STATE_WRITING_TAG;
 }
 
 static void state_task_poll(void)
 {
     event_msg_t msg;
-    TickType_t wait = pdMS_TO_TICKS(s_wifi_attempt != 0 ? WIFI_ATTEMPT_POLL_MS : STATE_TASK_POLL_MS);
+    TickType_t wait = pdMS_TO_TICKS(s_state_task.wifi_attempt != 0 ? WIFI_ATTEMPT_POLL_MS : STATE_TASK_POLL_MS);
     if (xQueueReceive(s_event_queue, &msg, wait) == pdTRUE) {
         handle_event(&msg);
 
-        /* A tag write must end through URL_SET_DONE, so the alarm waits for it. */
-        if (s_state != APP_STATE_WRITING_TAG && atomic_exchange(&s_overflow_alarm, false)) {
+        if (overflow_alarm_may_fire() && atomic_exchange(&s_overflow_alarm, false)) {
             ESP_LOGE(TAG, "Event queue overflowed %d times in a row, entering ERROR state",
                      QUEUE_OVERFLOW_THRESHOLD);
-            transition_to(APP_STATE_ERROR, APP_EVENT_COUNT);
+            transition_to(APP_STATE_ERROR, TRANSITION_CAUSE_NONE);
         }
-    } else if (s_critical_battery_pending) {
+    } else if (s_state_task.deep_sleep_postponed) {
         power_down_when_idle();
     }
     finish_wifi_attempt();
@@ -698,8 +705,6 @@ static esp_err_t init_nvs(void)
 {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        /* Without NVS the device cannot boot to the button that factory-resets it. Everything stored
-         * here (Wi-Fi credentials, BLE bonds, device id) comes back through onboarding, so erase. */
         ESP_LOGW(TAG, "NVS needs an erase (%s), stored settings are lost", esp_err_to_name(err));
         ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "NVS erase failed");
         err = nvs_flash_init();
@@ -707,25 +712,25 @@ static esp_err_t init_nvs(void)
     return err;
 }
 
-/* Starts what the state task needs to run. A failure here leaves nothing that can show the error
- * except the LED, so the caller returns it. */
-static esp_err_t init_core(void)
+static esp_err_t init_core(bool *boot_fault)
 {
-    /* The LED comes first so that every later failure can show itself. */
     ESP_RETURN_ON_ERROR(hal_indicator_init(), TAG, "Indicator init failed");
     ESP_RETURN_ON_ERROR(init_nvs(), TAG, "NVS init failed");
 
-    /* Brownout is a power event and not a software fault, so it does not count. */
     esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(TAG, "Reset reason: %d", (int)reset_reason);
     if (reset_reason == ESP_RST_TASK_WDT || reset_reason == ESP_RST_INT_WDT ||
             reset_reason == ESP_RST_WDT || reset_reason == ESP_RST_PANIC) {
         ESP_LOGE(TAG, "Abnormal reset detected (reason=%d)", (int)reset_reason);
-        s_boot_fault = true;
+        *boot_fault = true;
     }
 
     ESP_RETURN_ON_ERROR(hal_diagnostics_init(), TAG, "Diagnostics init failed");
+    return ESP_OK;
+}
 
+static esp_err_t start_state_task(void)
+{
     s_event_queue = xQueueCreate(EVENT_QUEUE_SIZE, sizeof(event_msg_t));
     ESP_RETURN_ON_FALSE(s_event_queue != NULL, ESP_ERR_NO_MEM, TAG, "Event queue create failed");
     ESP_RETURN_ON_FALSE(xTaskCreate(state_machine_task, "app_state", STATE_TASK_STACK, NULL, STATE_TASK_PRIORITY,
@@ -764,9 +769,7 @@ static esp_err_t init_power(void)
 }
 #endif
 
-/* Returns the first failure after it tried every step. The button must start even when another step
- * fails, because it leaves the error state and runs the factory reset. */
-static esp_err_t init_peripherals(void)
+static esp_err_t init_every_peripheral_returning_first_error(void)
 {
     static const struct {
         const char *name;
@@ -797,20 +800,22 @@ static esp_err_t init_peripherals(void)
 
 esp_err_t app_state_init(void)
 {
-    esp_err_t err = init_core();
+    bool boot_fault = false;
+    esp_err_t err = init_core(&boot_fault);
+    if (err == ESP_OK) {
+        err = start_state_task();
+    }
     if (err != ESP_OK) {
-        /* Shows only when the indicator started. */
         set_led(LED_PATTERN_NETWORK_ERROR);
         return err;
     }
 
-    /* The queue and the state task exist, so the callbacks of these HALs can post at once. */
-    err = init_peripherals();
+    err = init_every_peripheral_returning_first_error();
     if (err != ESP_OK) {
-        s_boot_fault = true;
+        boot_fault = true;
     }
 
-    esp_err_t post_err = app_post_event(APP_EVENT_INIT_COMPLETE, NULL, 0);
+    esp_err_t post_err = app_post_event(APP_EVENT_INIT_COMPLETE, &boot_fault, sizeof(boot_fault));
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Application state machine initialized");
         return post_err;
