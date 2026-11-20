@@ -121,7 +121,6 @@ static void battery_monitor_task(void *arg)
             continue;
         }
 
-        ESP_LOGI(TAG, "Battery level changed: %d -> %d", reported, state.level);
         if (state.level == HAL_BATTERY_LOW || state.level == HAL_BATTERY_CRITICAL) {
             hal_low_battery_cb_t callback = atomic_load(&s_low_battery_callback);
             esp_err_t err = callback != NULL ? callback(state.level) : ESP_ERR_INVALID_STATE;
@@ -131,6 +130,7 @@ static void battery_monitor_task(void *arg)
                 continue;
             }
         }
+        ESP_LOGI(TAG, "Battery level changed: %d -> %d", reported, state.level);
         reported = state.level;
     }
 }

@@ -135,15 +135,23 @@ static bool all_hex(const char *text, size_t len)
     return true;
 }
 
-/* Counts a failed attempt, reports the state it leads to and starts the timer for the next one.
- * disconnect is NULL for an attempt that failed before the driver raised an event. */
-static void retry_after_failure(const wifi_event_sta_disconnected_t *disconnect)
+static void restart_timer(esp_timer_handle_t timer, uint32_t delay_ms, const char *name)
+{
+    esp_timer_stop(timer);
+    esp_err_t err = esp_timer_start_once(timer, (uint64_t)delay_ms * 1000);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "%s timer failed to start: %s", name, esp_err_to_name(err));
+    }
+}
+
+/* Counts a failed attempt, reports the state it leads to and starts the timer for the next one. */
+static void retry_after_failure(uint8_t reason)
 {
     int delay_ms;
     int attempt = retry_next(&delay_ms);
-    if (s_network.credentials_unproven && attempt >= WIFI_NEW_CREDENTIALS_MAX_ATTEMPTS && disconnect != NULL &&
-            reason_is_credential_failure(disconnect->reason)) {
-        ESP_LOGW(TAG, "New credentials failed %d times (reason %d), giving up", attempt, disconnect->reason);
+    if (s_network.credentials_unproven && attempt >= WIFI_NEW_CREDENTIALS_MAX_ATTEMPTS &&
+            reason_is_credential_failure(reason)) {
+        ESP_LOGW(TAG, "New credentials failed %d times (reason %d), giving up", attempt, reason);
         s_network.auto_reconnect = false;
         set_state(HAL_WIFI_STATE_DISCONNECTED);
         return;
@@ -156,11 +164,7 @@ static void retry_after_failure(const wifi_event_sta_disconnected_t *disconnect)
     }
 
     ESP_LOGI(TAG, "Reconnecting in %d ms (attempt %d)", delay_ms, attempt);
-    esp_timer_stop(s_network.reconnect_timer);
-    esp_err_t err = esp_timer_start_once(s_network.reconnect_timer, (uint64_t)delay_ms * 1000);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Reconnect timer failed to start: %s", esp_err_to_name(err));
-    }
+    restart_timer(s_network.reconnect_timer, delay_ms, "Reconnect");
 }
 
 /* A connect call that fails at once raises no disconnect event, so it counts as a failed attempt here. */
@@ -169,7 +173,7 @@ static void start_connect(void)
     esp_err_t err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Connect failed to start: %s", esp_err_to_name(err));
-        retry_after_failure(NULL);
+        retry_after_failure(WIFI_REASON_UNSPECIFIED);
     }
 }
 
@@ -198,15 +202,6 @@ static void got_ip_timer_callback(void *arg)
     }
 }
 
-static void arm_got_ip_timer(void)
-{
-    esp_timer_stop(s_network.got_ip_timer);
-    esp_err_t err = esp_timer_start_once(s_network.got_ip_timer, (uint64_t)WIFI_GOT_IP_TIMEOUT_MS * 1000);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "IP address timer failed to start: %s", esp_err_to_name(err));
-    }
-}
-
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -221,7 +216,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         }
         start_connect();
     } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
-        arm_got_ip_timer();
+        restart_timer(s_network.got_ip_timer, WIFI_GOT_IP_TIMEOUT_MS, "IP address");
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = event_data;
 
@@ -239,7 +234,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             return;
         }
 
-        retry_after_failure(event);
+        retry_after_failure(event->reason);
     }
 }
 
@@ -260,7 +255,7 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
         if (hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED) {
             set_state(HAL_WIFI_STATE_CONNECTING);
         }
-        arm_got_ip_timer();
+        restart_timer(s_network.got_ip_timer, WIFI_GOT_IP_TIMEOUT_MS, "IP address");
     }
 }
 

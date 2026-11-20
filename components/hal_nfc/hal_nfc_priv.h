@@ -95,6 +95,8 @@ esp_err_t nfc_aes_cmac(const uint8_t key[16], const uint8_t *data, size_t len, u
 
 /* desfire_ev2.c: ISO 7816 select and DESFire EV2 secure messaging */
 
+/* Every APDU below returns HAL_NFC_ERR_SDM_TIMEOUT without sending once the deadline has passed. */
+
 /** ISO SELECT of the NDEF application by DF name */
 hal_nfc_err_t nfc_select_ndef_app(void);
 

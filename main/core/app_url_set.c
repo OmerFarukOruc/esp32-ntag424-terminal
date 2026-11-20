@@ -165,26 +165,29 @@ bool app_url_set_start(hal_ble_session_t session, const char *device_id, size_t 
     return true;
 }
 
+/* The id belongs to the tag, so it is stored only after the tag accepted it. */
+static url_set_result_t store_tag_device_id(const char *id)
+{
+    esp_err_t err = save_device_id(id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Tag holds device id %s, but saving it failed: %s", id, esp_err_to_name(err));
+        return RESULT(URL_SET_FAILED, "tag_configured_id_not_saved");
+    }
+    err = hal_ble_set_device_id(id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Tag holds device id %s, but DEVICE_INFO still shows the old one: %s", id,
+                 esp_err_to_name(err));
+        return RESULT(URL_SET_FAILED, "tag_configured_id_not_published");
+    }
+    return map_result(HAL_NFC_OK);
+}
+
 bool app_url_set_finish(hal_nfc_err_t nfc_err)
 {
-    bool success = (nfc_err == HAL_NFC_OK);
-    url_set_result_t result = map_result(nfc_err);
+    url_set_result_t result = nfc_err == HAL_NFC_OK ? store_tag_device_id(s_job.device_id) : map_result(nfc_err);
+    bool success = (result.code == URL_SET_OK);
     uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - s_job.started_us) / 1000);
     bool ble_connected_end = hal_ble_session_is_current(s_job.session);
-
-    if (success) {
-        /* The id belongs to the tag, so it is stored only after the tag accepted it. */
-        esp_err_t err = save_device_id(s_job.device_id);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Tag holds device id %s, but saving it failed: %s", s_job.device_id, esp_err_to_name(err));
-            result = RESULT(URL_SET_FAILED, "tag_configured_id_not_saved");
-        } else if ((err = hal_ble_set_device_id(s_job.device_id)) != ESP_OK) {
-            ESP_LOGE(TAG, "Tag holds device id %s, but DEVICE_INFO still shows the old one: %s", s_job.device_id,
-                     esp_err_to_name(err));
-            result = RESULT(URL_SET_FAILED, "tag_configured_id_not_published");
-        }
-        success = (result.code == URL_SET_OK);
-    }
 
     if (ble_connected_end) {
         send_result(s_job.session, result);

@@ -119,6 +119,11 @@ static void put_le24(uint8_t *out, uint32_t value)
     out[2] = (value >> 16) & 0xFF;
 }
 
+static uint32_t get_le24(const uint8_t *in)
+{
+    return in[0] | (in[1] << 8) | ((uint32_t)in[2] << 16);
+}
+
 /**
  * ChangeFileSettings for the NDEF file in CommMode.Full: file option 0x40
  * (SDM on), access rights 0x00E0, SDMOptions 0xC1 (UID and read counter
@@ -160,10 +165,12 @@ static int64_t ms_between(int64_t from_us, int64_t to_us)
     return (to_us - from_us) / 1000;
 }
 
-/** AUTH, a non-DESFire tag and a missing NDEF application give the same answer on every retry */
+/** AUTH, a non-DESFire tag and a missing NDEF application give the same answer on every retry,
+ * and after the timeout no retry may start */
 static bool retry_is_futile(hal_nfc_err_t err)
 {
-    return err == HAL_NFC_ERR_AUTH || err == HAL_NFC_ERR_TAG_NOT_DESFIRE || err == HAL_NFC_ERR_NOT_SUPPORTED;
+    return err == HAL_NFC_ERR_AUTH || err == HAL_NFC_ERR_TAG_NOT_DESFIRE || err == HAL_NFC_ERR_NOT_SUPPORTED ||
+           err == HAL_NFC_ERR_SDM_TIMEOUT;
 }
 
 /* GetFileSettings answer: FileType, FileOption, AccessRights (RW|Change, Read|Write), FileSize LE,
@@ -188,20 +195,12 @@ static hal_nfc_err_t check_ndef_file(const sdm_ndef_t *ndef)
                         "SDM config: GetFileSettings answer of %u bytes is too short", (unsigned)len);
 
     uint8_t change_key = fs[2] & 0x0F;
-    uint32_t size = fs[4] | (fs[5] << 8) | ((uint32_t)fs[6] << 16);
+    uint32_t size = get_le24(&fs[4]);
     ESP_RETURN_ON_FALSE(fs[0] == FILE_TYPE_STANDARD && size >= ndef->len &&
                         (change_key == ACCESS_KEY_0 || change_key == ACCESS_FREE),
                         HAL_NFC_ERR_NOT_SUPPORTED, TAG,
                         "SDM config: file 02 has type %u, %u bytes and change key %u; it needs a standard file of "
                         "%u bytes that key 0 may change", fs[0], (unsigned)size, change_key, (unsigned)ndef->len);
-    return HAL_NFC_OK;
-}
-
-/** Starts no tag command once the deadline has passed */
-static hal_nfc_err_t check_deadline(const char *next_step)
-{
-    ESP_RETURN_ON_FALSE(!nfc_deadline_passed(), HAL_NFC_ERR_SDM_TIMEOUT, TAG,
-                        "SDM config: timeout reached before %s", next_step);
     return HAL_NFC_OK;
 }
 
@@ -235,10 +234,6 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
      * time and a late command makes the PN532 report a protocol error (status
      * 0x0B). A retry resyncs the PN532 first. */
     for (int r = 0; r < SDM_SELECT_RETRIES; r++) {
-        err = check_deadline("SELECT");
-        if (err != HAL_NFC_OK) {
-            break;
-        }
         bool reinitialised = false;
         if (r > 0 && !nfc_reader_recover(&reinitialised)) {
             err = HAL_NFC_ERR_PN532_UNRESPONSIVE;
@@ -260,29 +255,17 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
     }
     t_select = esp_timer_get_time();
 
-    err = check_deadline("GetFileSettings");
-    if (err != HAL_NFC_OK) {
-        goto release;
-    }
     err = check_ndef_file(ndef);
     if (err != HAL_NFC_OK) {
         goto release;
     }
 
-    err = check_deadline("authentication");
-    if (err != HAL_NFC_OK) {
-        goto release;
-    }
     err = nfc_ev2_authenticate(0, FACTORY_KEY);
     if (err != HAL_NFC_OK) {
         ESP_LOGW(TAG, "SDM config: authentication failed (%d)", err);
         goto release;
     }
 
-    err = check_deadline("WriteData");
-    if (err != HAL_NFC_OK) {
-        goto release;
-    }
     err = nfc_ev2_write_file(SDM_NDEF_FILE_NO, ndef->msg, ndef->len);
     if (err != HAL_NFC_OK) {
         ESP_LOGW(TAG, "SDM config: WriteData failed (%d)", err);
@@ -291,10 +274,6 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
     t_write = esp_timer_get_time();
     ESP_LOGI(TAG, "SDM config: NDEF URL written via DESFire WriteData (%zu bytes)", ndef->len);
 
-    err = check_deadline("ChangeFileSettings, the NDEF URL is written but SDM is off");
-    if (err != HAL_NFC_OK) {
-        goto release;
-    }
     err = change_file_settings_sdm(ndef);
     if (err != HAL_NFC_OK) {
         ESP_LOGW(TAG, "SDM config: ChangeFileSettings failed (%d)", err);
@@ -308,6 +287,9 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
              (long long)ms_between(t_start, t_end));
 
 release:
+    if (err == HAL_NFC_ERR_SDM_TIMEOUT && t_write != 0) {
+        ESP_LOGW(TAG, "SDM config: timeout after WriteData, the NDEF URL is written but SDM is off");
+    }
     nfc_deadline_allow_cleanup();
     nfc_reader_release_tag();
     return err;

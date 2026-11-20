@@ -55,7 +55,6 @@ typedef struct {
     uint8_t data[EVENT_DATA_MAX];
 } event_msg_t;
 
-_Static_assert(EVENT_DATA_MAX >= HAL_BLE_DEVICE_ID_MAX, "event data must hold a device id");
 _Static_assert(EVENT_DATA_MAX >= sizeof(hal_nfc_err_t), "event data must hold a tag write result");
 _Static_assert(APP_STATE_COUNT <= UINT8_MAX && APP_EVENT_COUNT <= UINT8_MAX,
                "hal_diagnostics stores states and events in one byte");
@@ -136,17 +135,34 @@ static struct {
     hal_ble_wifi_config_t config;
 } s_wifi_slot = {.lock = portMUX_INITIALIZER_UNLOCKED};
 
-/** Copies the waiting credentials into out, when not NULL, and wipes the slot. False when it was empty. */
-static bool take_wifi_config(hal_ble_wifi_config_t *out)
+_Static_assert(sizeof(((hal_wifi_credentials_t *)0)->ssid) == sizeof(((hal_ble_wifi_config_t *)0)->ssid) &&
+               sizeof(((hal_wifi_credentials_t *)0)->password) == sizeof(((hal_ble_wifi_config_t *)0)->password),
+               "BLE and network credentials must have the same layout");
+
+static void wipe_wifi_slot_locked(void)
 {
-    taskENTER_CRITICAL(&s_wifi_slot.lock);
-    bool full = s_wifi_slot.full;
-    if (full && out != NULL) {
-        *out = s_wifi_slot.config;
-    }
     explicit_bzero(&s_wifi_slot.config, sizeof(s_wifi_slot.config));
     s_wifi_slot.full = false;
-    taskEXIT_CRITICAL(&s_wifi_slot.lock);
+}
+
+static void wipe_wifi_slot(void)
+{
+    portENTER_CRITICAL(&s_wifi_slot.lock);
+    wipe_wifi_slot_locked();
+    portEXIT_CRITICAL(&s_wifi_slot.lock);
+}
+
+/** Moves the waiting credentials into creds and wipes the slot. False when the slot was empty. */
+static bool take_wifi_credentials(hal_wifi_credentials_t *creds)
+{
+    portENTER_CRITICAL(&s_wifi_slot.lock);
+    bool full = s_wifi_slot.full;
+    if (full) {
+        memcpy(creds->ssid, s_wifi_slot.config.ssid, sizeof(creds->ssid));
+        memcpy(creds->password, s_wifi_slot.config.password, sizeof(creds->password));
+    }
+    wipe_wifi_slot_locked();
+    portEXIT_CRITICAL(&s_wifi_slot.lock);
     return full;
 }
 
@@ -154,18 +170,18 @@ static esp_err_t post_wifi_config(hal_ble_session_t session, const void *data, s
 {
     ESP_RETURN_ON_FALSE(data_len == sizeof(hal_ble_wifi_config_t), ESP_ERR_INVALID_SIZE, TAG,
                         "WiFi config of unexpected size %u", (unsigned)data_len);
-    taskENTER_CRITICAL(&s_wifi_slot.lock);
+    portENTER_CRITICAL(&s_wifi_slot.lock);
     bool busy = s_wifi_slot.full;
     if (!busy) {
         memcpy(&s_wifi_slot.config, data, data_len);
         s_wifi_slot.full = true;
     }
-    taskEXIT_CRITICAL(&s_wifi_slot.lock);
+    portEXIT_CRITICAL(&s_wifi_slot.lock);
     ESP_RETURN_ON_FALSE(!busy, ESP_ERR_INVALID_STATE, TAG, "The previous WiFi config is still waiting");
 
     esp_err_t err = post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, session, NULL, 0, 0);
     if (err != ESP_OK) {
-        take_wifi_config(NULL);
+        wipe_wifi_slot();
     }
     return err;
 }
@@ -356,7 +372,10 @@ static void factory_reset(void)
 static void power_down_when_idle(void)
 {
     if (s_state == APP_STATE_WRITING_TAG || app_wifi_scan_running()) {
-        ESP_LOGW(TAG, "Deep sleep postponed: a %s is running", s_state == APP_STATE_WRITING_TAG ? "tag write" : "scan");
+        if (!s_critical_battery_pending) {
+            ESP_LOGW(TAG, "Deep sleep postponed: a %s is running",
+                     s_state == APP_STATE_WRITING_TAG ? "tag write" : "scan");
+        }
         s_critical_battery_pending = true;
         return;
     }
@@ -375,18 +394,11 @@ static void send_wifi_result(hal_ble_session_t session, bool success)
 
 static void handle_wifi_config(hal_ble_session_t session)
 {
-    hal_ble_wifi_config_t config;
-    if (!take_wifi_config(&config)) {
+    hal_wifi_credentials_t creds = {0};
+    if (!take_wifi_credentials(&creds)) {
         ESP_LOGW(TAG, "WiFi config event without credentials");
         return;
     }
-
-    hal_wifi_credentials_t creds = {0};
-    _Static_assert(sizeof(creds.ssid) == sizeof(config.ssid) && sizeof(creds.password) == sizeof(config.password),
-                   "BLE and network credentials must have the same layout");
-    memcpy(creds.ssid, config.ssid, sizeof(creds.ssid));
-    memcpy(creds.password, config.password, sizeof(creds.password));
-    explicit_bzero(&config, sizeof(config));
 
     esp_err_t err = hal_wifi_connect(&creds);
     explicit_bzero(&creds, sizeof(creds));
@@ -411,9 +423,6 @@ static void finish_tag_write(const void *data)
         transition_to(APP_STATE_ONBOARDING_BLE, APP_EVENT_URL_SET_DONE);
         set_led(success ? LED_PATTERN_SUCCESS : LED_PATTERN_NETWORK_ERROR);
         play(success ? BUZZER_SOUND_SUCCESS : BUZZER_SOUND_NETWORK_ERROR);
-    }
-    if (s_critical_battery_pending) {
-        power_down_when_idle();
     }
 }
 
@@ -533,9 +542,6 @@ static void dispatch_event(const event_msg_t *msg)
         return;
     case APP_EVENT_WIFI_SCAN_DONE:
         app_wifi_scan_done();
-        if (s_critical_battery_pending) {
-            power_down_when_idle();
-        }
         return;
     case APP_EVENT_WIFI_CONNECTED:
         ESP_ERROR_CHECK_WITHOUT_ABORT(hal_time_start_sync());
@@ -568,7 +574,10 @@ static void handle_event(const event_msg_t *msg)
 {
     dispatch_event(msg);
     if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
-        take_wifi_config(NULL);
+        wipe_wifi_slot();
+    }
+    if (s_critical_battery_pending) {
+        power_down_when_idle();
     }
 }
 

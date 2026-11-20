@@ -51,6 +51,8 @@ void ble_store_config_init(void);
 
 /* Chosen, not from a source: a 32-byte SSID and a 64-byte password with the JSON keys need about 120 bytes. */
 #define WRITE_MAX_LEN 200
+/* Chosen, not from a source: a scan entry whose 32-byte SSID is all \u00XX escapes is about 240 bytes. */
+#define NOTIFY_BUF_SIZE 256
 /* Chosen, not from a source: NimBLE returns BLE_HS_ENOMEM while its buffer pool is empty. */
 #define NOTIFY_SEND_ATTEMPTS 3
 #define NOTIFY_RETRY_DELAY_MS 20
@@ -86,10 +88,8 @@ typedef struct {
 
 static atomic_bool s_initialized;
 static atomic_bool s_adv_wanted;  /* True from start_advertising until stop_advertising */
-/* The connection handle in the low 16 bits and a count of connections in the high 16 bits, so a
- * handle that NimBLE reuses for a later client gives another session. */
 static _Atomic hal_ble_session_t s_session = HAL_BLE_SESSION_NONE;
-static uint16_t s_connection_count;  /* Only the host task touches it */
+static uint16_t s_connection_count;
 static uint8_t s_own_addr_type;
 static struct ble_npl_event s_adv_event;
 
@@ -128,6 +128,11 @@ static int admit(hal_ble_event_t event, const void *data, size_t data_len)
         return BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     return 0;
+}
+
+static hal_ble_session_t session_make(uint16_t connection_count, uint16_t conn_handle)
+{
+    return ((hal_ble_session_t)connection_count << 16) | conn_handle;
 }
 
 static uint16_t session_conn_handle(hal_ble_session_t session)
@@ -214,12 +219,17 @@ static bool has_nul(const char *text, size_t len)
     return false;
 }
 
-/* Reads a write into a stack buffer that is wiped before return, and parses it. The write must be one
- * JSON value with nothing but whitespace after it. Returns 0 or an ATT error code. */
-static int parse_json_write(struct os_mbuf *om, cJSON **json)
+/* Checks that the reply on chr can reach the client, then reads the write into a stack buffer that is
+ * wiped before return and parses it. The write must be one JSON value with nothing but whitespace after
+ * it. Returns 0 or an ATT error code. */
+static int parse_request(uint16_t conn_handle, notify_chr_t *chr, struct os_mbuf *om, cJSON **json)
 {
+    int att = reply_possible(conn_handle, chr);
+    if (att != 0) {
+        return att;
+    }
+
     char buf[WRITE_MAX_LEN + 1];
-    int att = 0;
     uint16_t len = OS_MBUF_PKTLEN(om);
     uint16_t copied = 0;
 
@@ -338,10 +348,7 @@ static int wifi_config_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                                   struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     cJSON *json = NULL;
-    int att = reply_possible(conn_handle, &s_wifi_config);
-    if (att == 0) {
-        att = parse_json_write(ctxt->om, &json);
-    }
+    int att = parse_request(conn_handle, &s_wifi_config, ctxt->om, &json);
     if (att != 0) {
         return att;
     }
@@ -363,10 +370,7 @@ static int url_set_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     cJSON *json = NULL;
-    int att = reply_possible(conn_handle, &s_url_set);
-    if (att == 0) {
-        att = parse_json_write(ctxt->om, &json);
-    }
+    int att = parse_request(conn_handle, &s_url_set, ctxt->om, &json);
     if (att != 0) {
         return att;
     }
@@ -451,7 +455,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             ESP_LOGI(TAG, "BLE connected, conn_handle=%d", event->connect.conn_handle);
             s_connection_count++;
-            atomic_store(&s_session, ((hal_ble_session_t)s_connection_count << 16) | event->connect.conn_handle);
+            atomic_store(&s_session, session_make(s_connection_count, event->connect.conn_handle));
         } else {
             ESP_LOGW(TAG, "BLE connection failed, status=%d", event->connect.status);
             adv_reconcile();
@@ -669,7 +673,7 @@ static cJSON *built_or_null(cJSON *json, bool built)
  * host task. */
 static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON *json)
 {
-    char *text = NULL;
+    char text[NOTIFY_BUF_SIZE];
     esp_err_t ret = ESP_OK;
     uint16_t conn = session_conn_handle(session);
 
@@ -682,8 +686,8 @@ static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON
     uint16_t mtu = ble_att_mtu(conn);
     ESP_GOTO_ON_FALSE(mtu != 0, ESP_ERR_INVALID_STATE, out, TAG, "BLE connection lost");
     size_t max_len = mtu > ATT_NOTIFY_OVERHEAD ? mtu - ATT_NOTIFY_OVERHEAD : 0;
-    text = cJSON_PrintUnformatted(json);
-    ESP_GOTO_ON_FALSE(text != NULL, ESP_ERR_NO_MEM, out, TAG, "Failed to serialize notification");
+    ESP_GOTO_ON_FALSE(cJSON_PrintPreallocated(json, text, sizeof(text), false), ESP_ERR_INVALID_SIZE, out, TAG,
+                      "Notification does not fit %u bytes", (unsigned)sizeof(text));
     size_t len = strlen(text);
     ESP_GOTO_ON_FALSE(len <= max_len, ESP_ERR_INVALID_SIZE, out, TAG,
                       "Notification of %zu bytes exceeds ATT MTU - 3 (%zu bytes)", len, max_len);
@@ -701,7 +705,6 @@ static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON
     }
 
 out:
-    cJSON_free(text);
     cJSON_Delete(json);
     return ret;
 }

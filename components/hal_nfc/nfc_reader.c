@@ -14,7 +14,6 @@
  */
 
 #include "hal_nfc_priv.h"
-#include "driver/uart.h"
 #include "esp_timer.h"
 
 static const char *TAG = "hal_nfc";

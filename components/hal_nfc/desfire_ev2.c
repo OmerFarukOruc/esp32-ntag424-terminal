@@ -15,6 +15,7 @@
 #include <string.h>
 #include "hal_nfc_priv.h"
 #include "esp_random.h"
+#include "mbedtls/constant_time.h"
 
 static const char *TAG = "hal_nfc";
 
@@ -58,6 +59,7 @@ void nfc_ev2_session_reset(void)
 static hal_nfc_err_t apdu_exchange(uint8_t buf[NFC_APDU_BUF_SIZE], size_t apdu_len, size_t *rx_len)
 {
     ESP_RETURN_ON_FALSE(g_nfc.pn532 != NULL, HAL_NFC_ERR_NOT_INIT, TAG, "PN532 not initialized");
+    ESP_RETURN_ON_FALSE(!nfc_deadline_passed(), HAL_NFC_ERR_SDM_TIMEOUT, TAG, "Timeout reached, no APDU sent");
 
     const char *errstr = NULL;
     int result = pn532_dx(g_nfc.pn532, apdu_len, buf, NFC_APDU_BUF_SIZE, &errstr);
@@ -294,30 +296,25 @@ static void cmac_truncate(const uint8_t full_mac[AES_BLOCK_LEN], uint8_t short_m
     }
 }
 
-static bool mac_equal(const uint8_t a[CMD_MAC_LEN], const uint8_t b[CMD_MAC_LEN])
+static void put_le16(uint8_t out[2], uint16_t value)
 {
-    uint8_t diff = 0;
-    for (int i = 0; i < CMD_MAC_LEN; i++) {
-        diff |= a[i] ^ b[i];
-    }
-    return diff == 0;
+    out[0] = value & 0xFF;
+    out[1] = value >> 8;
 }
 
 /** Checks the MAC the tag sends after a CommMode.Full command without response data */
 static hal_nfc_err_t verify_response_mac(const uint8_t response[CMD_MAC_LEN])
 {
     /* MAC input: RC 00 || CmdCtr + 1 LE || TI */
-    uint16_t ctr = s_session.cmd_ctr + 1;
-    const uint8_t mac_input[7] = {
-        DESFIRE_STATUS_OK, ctr & 0xFF, (ctr >> 8) & 0xFF,
-        s_session.ti[0], s_session.ti[1], s_session.ti[2], s_session.ti[3],
-    };
+    uint8_t mac_input[7] = {DESFIRE_STATUS_OK};
+    put_le16(&mac_input[1], s_session.cmd_ctr + 1);
+    memcpy(&mac_input[3], s_session.ti, 4);
     uint8_t full_mac[AES_BLOCK_LEN];
     uint8_t expected[CMD_MAC_LEN];
     ESP_RETURN_ON_FALSE(nfc_aes_cmac(s_session.ses_auth_mac_key, mac_input, sizeof(mac_input), full_mac) == ESP_OK,
                         HAL_NFC_ERR_COMM, TAG, "Response MAC failed");
     cmac_truncate(full_mac, expected);
-    ESP_RETURN_ON_FALSE(mac_equal(expected, response), HAL_NFC_ERR_COMM, TAG, "Tag response MAC does not match");
+    ESP_RETURN_ON_FALSE(mbedtls_ct_memcmp(expected, response, CMD_MAC_LEN) == 0, HAL_NFC_ERR_COMM, TAG, "Tag response MAC does not match");
     return HAL_NFC_OK;
 }
 
@@ -332,8 +329,7 @@ hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *setti
     uint8_t iv_input[AES_BLOCK_LEN] = {0xA5, 0x5A};
     uint8_t cmd_iv[AES_BLOCK_LEN];
     memcpy(&iv_input[2], s_session.ti, 4);
-    iv_input[6] = s_session.cmd_ctr & 0xFF;
-    iv_input[7] = (s_session.cmd_ctr >> 8) & 0xFF;
+    put_le16(&iv_input[6], s_session.cmd_ctr);
     ESP_RETURN_ON_FALSE(nfc_aes_cbc_encrypt(s_session.ses_auth_enc_key, IV_ZERO, iv_input, sizeof(iv_input),
                                             cmd_iv) == ESP_OK,
                         HAL_NFC_ERR_COMM, TAG, "Command IV derivation failed");
@@ -355,8 +351,8 @@ hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *setti
     uint8_t mac_input[7 + 1 + CFS_MAX_PADDED_LEN];
     size_t mac_input_len = 0;
     mac_input[mac_input_len++] = DESFIRE_INS_CHANGE_FILE_SETTINGS;
-    mac_input[mac_input_len++] = s_session.cmd_ctr & 0xFF;
-    mac_input[mac_input_len++] = (s_session.cmd_ctr >> 8) & 0xFF;
+    put_le16(&mac_input[mac_input_len], s_session.cmd_ctr);
+    mac_input_len += 2;
     memcpy(&mac_input[mac_input_len], s_session.ti, 4);
     mac_input_len += 4;
     memcpy(&mac_input[mac_input_len], cmd_data, 1 + padded_len);
