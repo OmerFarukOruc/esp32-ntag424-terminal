@@ -9,6 +9,7 @@ A change is done when these commands pass in the worktree you changed.
 ```sh
 ./scripts/build.sh
 test/host/run.sh
+python test/host/test_readme_verifier.py
 pre-commit run --all-files
 ```
 
@@ -16,7 +17,7 @@ pre-commit run --all-files
 
 CI also builds each `sdkconfig.ci.*` file, which flips the options the default build leaves on one side of an `#if`. When you add an `#if CONFIG_...` branch, put the option that reaches it into one of those files, and build it locally with `idf.py -B build-<name> -D SDKCONFIG=build-<name>/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ci.<name>" build`. To find a build failure in a log, grep `': (error|warning):|^FAILED'`, because a bare `error` also matches object files such as `error.c.obj`.
 
-`test/host/run.sh` builds `main/core`, the `hal_ble`, `hal_network`, `hal_nfc`, `hal_power`, `hal_button` and `pn532_driver` components, and the vendored `libs/ESP32-PN532/pn532.c` for the host against the stand-ins in `test/host/stubs/` and `test/host/support/`, and runs the suites `app_state`, `ble`, `network`, `desfire`, `sdm`, `pn532_io`, `power` and `button`; name suites as arguments to run only those. A suite that runs no check fails, and a compiler warning fails the build. It needs gcc, the OpenSSL `libcrypto` headers, and `managed_components/` from a build. When a change alters a HAL header or an ESP-IDF, FreeRTOS or NimBLE call that a suite reaches, update the stand-in in the same commit. A bug fix in code a suite reaches adds its reproduction to that suite's `test_*.c`, and the new check must fail on the code before the fix.
+`test/host/run.sh` builds `main/core`, the `hal_ble`, `hal_network`, `hal_nfc`, `hal_power`, `hal_button` and `pn532_driver` components, and the vendored `libs/ESP32-PN532/pn532.c` for the host against the stand-ins in `test/host/stubs/` and `test/host/support/`, and runs the suites `app_state`, `ble`, `network`, `desfire`, `sdm`, `pn532_io`, `power` and `button`; name suites as arguments to run only those. A suite that runs no check fails, and a compiler warning fails the build. It needs gcc, the OpenSSL `libcrypto` headers, and `managed_components/` from a build. `test/host/test_readme_verifier.py` runs the README's Python `verify` block, so run it after any change to that block. It needs the `cryptography` package of the ESP-IDF Python, so run it in a shell where ESP-IDF is active, for example after `source "${IDF_ACTIVATE:-$HOME/.espressif/tools/activate_idf_v6.1.sh}"`. When a change alters a HAL header or an ESP-IDF, FreeRTOS or NimBLE call that a suite reaches, update the stand-in in the same commit. A bug fix in code a suite reaches adds its reproduction to that suite's `test_*.c`, and the new check must fail on the code before the fix.
 
 Hardware behaviour cannot be checked in CI. Mark a claim about the PN532, the tag, BLE pairing, or timing as unverified until [docs/hardware-test-runbook.md](docs/hardware-test-runbook.md) has run on a board.
 

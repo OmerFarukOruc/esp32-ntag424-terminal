@@ -272,7 +272,7 @@ A backend verifies a request in these steps.
 4. Keep bytes 1, 3, 5 up to 15 of the 16 byte result. This 8 byte value must equal `cmac`.
 5. Accept the request only when the counter is greater than the last counter seen for that UID. The counter rises with every NDEF read, not with every tap. A phone that polls the tag reads many times, so do not require `last + 1`. The counter has 24 bits. Compare and store the counter in one atomic step per UID, so two requests with the same counter cannot both pass. Also check that the UID belongs to the `<device_id>` in the path, because the tag MACs only its UID and counter, not the URL.
 
-This Python function implements steps 1 to 4 and the counter comparison of step 5. It needs the `cryptography` package, and the all-zero key stands for the factory key. It returns the UID and counter of a valid request, and `None` for any other input, including hex of the wrong length. The caller still does two parts of step 5: it stores the returned counter for that UID in the same atomic step as the read of `last_counter`, and it checks that the UID belongs to the `<device_id>` in the path.
+This Python function implements steps 1 to 4 and the counter comparison of step 5. It needs the `cryptography` package, and the all-zero key stands for the factory key. `last_counter` is the last counter accepted for that UID, or -1 before its first accepted request. The function returns the UID and counter of a valid request, and `None` for any other input, including hex of the wrong length and a `last_counter` that is not an exact `int` of at least -1, such as `None`, `True`, `60.0` or an `int` subclass. The caller still does two parts of step 5: it stores the returned counter for that UID in the same atomic step as the read of `last_counter`, and it checks that the UID belongs to the `<device_id>` in the path.
 
 ```python
 import hmac
@@ -286,6 +286,8 @@ HEX = re.compile(r"[0-9A-Fa-f]*")
 
 
 def verify(picc_hex, cmac_hex, last_counter):
+    if type(last_counter) is not int or last_counter < -1:
+        return None
     if not (isinstance(picc_hex, str) and isinstance(cmac_hex, str)):
         return None
     if len(picc_hex) != 32 or len(cmac_hex) != 16 or not HEX.fullmatch(picc_hex + cmac_hex):
@@ -359,12 +361,14 @@ CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and 
 - `pre-commit` runs the pre-commit stage hooks except `gitleaks`.
 - `gitleaks` scans the full git history.
 - `build` runs in the `espressif/idf:v6.1` container once per configuration: `default` builds `sdkconfig.defaults`, and each other leg adds one `sdkconfig.ci.*` file on top. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build. Each leg fails when the build changes `dependencies.lock`, and restores its ccache folder from the GitHub Actions cache. Only runs on `main` save that folder, so pull requests and tags reuse the compiler output of the newest `main` run. The `default` leg uploads the firmware files.
-- `host-tests` runs `test/host/run.sh` in the same container.
+- `host-tests` runs `test/host/run.sh` and `test/host/test_readme_verifier.py` in the same container.
 - `publish` runs only for a `v*` tag, and only after the other four jobs pass.
 
 For a `v*` tag, the `default` leg of `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule, the managed cJSON component, the resolved `sdkconfig` and a `version.txt` with the tag. The archive therefore rebuilds without network access and gives the firmware the tag as its version. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
 
 `test/host/run.sh` builds the state machine, the BLE, network, NFC, power and button HALs, the PN532 driver wrapper and the vendored PN532 driver for the host with AddressSanitizer and UBSan, against stand-ins for ESP-IDF, FreeRTOS and NimBLE, and runs one suite per area. It needs gcc, the OpenSSL `libcrypto` headers, and the `managed_components/` folder that `idf.py build` or `idf.py reconfigure` creates. A passing run says nothing about the PN532, the tag, or the radio, because the stand-ins answer as the code expects.
+
+`test/host/test_readme_verifier.py` runs the `verify` function from the Python block above against the test vector and against `last_counter` values it must refuse. Run it in a shell where ESP-IDF is active, because the ESP-IDF Python ships the `cryptography` package: `source "${IDF_ACTIVATE:-$HOME/.espressif/tools/activate_idf_v6.1.sh}" && python test/host/test_readme_verifier.py`. Set `IDF_ACTIVATE` when your installation keeps the activation script elsewhere, as for `scripts/build.sh`.
 
 Agent and contributor rules are in [AGENTS.md](AGENTS.md). The checklist for testing on real hardware is [docs/hardware-test-runbook.md](docs/hardware-test-runbook.md).
 
