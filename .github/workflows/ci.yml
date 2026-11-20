@@ -94,7 +94,9 @@ jobs:
           . "$IDF_PATH/export.sh"
           export CCACHE_DIR="$PWD/.ccache"
           ccache --zero-stats
-          if [ "$CFG" = default ]; then
+          if [ "$CFG" = default ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            idf.py -D "PROJECT_VER=$GITHUB_REF_NAME" build
+          elif [ "$CFG" = default ]; then
             idf.py build
           else
             idf.py -B "build-$CFG" -D SDKCONFIG="build-$CFG/sdkconfig" \
@@ -108,23 +110,17 @@ jobs:
           key: ccache-${{ matrix.config }}-${{ github.run_id }}
       - name: Check that the build left dependencies.lock unchanged
         run: git diff --exit-code dependencies.lock
-      # merge-bin depends on the all target, so it builds the firmware first.
-      - name: Merge the release image
-        if: matrix.release && startsWith(github.ref, 'refs/tags/v')
-        run: . "$IDF_PATH/export.sh" && idf.py merge-bin -o "esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin"
       # The firmware links the GPL-3.0 PN532 library, so the release carries the
       # complete source including the submodule, which GitHub's tag archive omits.
-      # The managed components, the resolved sdkconfig and version.txt let the
-      # archive rebuild offline with the tag as the firmware version.
-      - name: Collect the release files
-        if: matrix.release && startsWith(github.ref, 'refs/tags/v')
+      - name: Package the release candidate
+        if: matrix.release
         run: |
-          mkdir dist
-          printf '%s\n' "$GITHUB_REF_NAME" > version.txt
-          { git ls-files -z --recurse-submodules; printf '%s\0' version.txt sdkconfig; find managed_components -type f -print0; } \
-            | tar --null -T - --transform "s,^,esp32-ntag424-terminal-${GITHUB_REF_NAME}/," \
-                -czf "dist/esp32-ntag424-terminal-${GITHUB_REF_NAME}-source.tar.gz"
-          cp "build/esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin" build/esp32-ntag424-terminal.elf dist/
+          . "$IDF_PATH/export.sh"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python3 scripts/package_release.py "$GITHUB_REF_NAME" build dist --expected-version "$GITHUB_REF_NAME"
+          else
+            python3 scripts/package_release.py "review-${GITHUB_SHA::7}" build dist
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: matrix.release
         with:
@@ -136,11 +132,37 @@ jobs:
             build/partition_table/partition-table.bin
             build/flasher_args.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: matrix.release && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.release
         with:
           name: release
           path: dist/*
           if-no-files-found: error
+
+  release-rebuild:
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      IDF_IMAGE: espressif/idf:v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: Pull the ESP-IDF image
+        run: docker pull "$IDF_IMAGE"
+      - name: Rebuild the candidate from its source archive without network access
+        run: |
+          mkdir "$RUNNER_TEMP/release-check"
+          docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$PWD/dist:/dist:ro" -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP/release-check:/work" \
+            "$IDF_IMAGE" bash -c '. "$IDF_PATH/export.sh" >/dev/null && python3 /scripts/check_release.py /dist /work/rebuild'
+      - name: Show the end of the rebuild log
+        if: failure()
+        run: tail -n 100 "$RUNNER_TEMP/release-check/rebuild/build.log" || true
 
   host-tests:
     runs-on: ubuntu-26.04
@@ -169,7 +191,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [pre-commit, gitleaks, build, host-tests]
+    needs: [pre-commit, gitleaks, build, release-rebuild, host-tests]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
