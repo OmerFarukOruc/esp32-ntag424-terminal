@@ -75,6 +75,11 @@ esp_err_t hal_nfc_init(void);
  * After configuration, each phone tap reads
  * {CONFIG_HAL_NFC_SDM_BASE_URL}/{device_id}?picc_data={32hex}&cmac={16hex}
  *
+ * The first tag detected becomes the job's tag. A later attempt that finds a
+ * tag with another UID sends it no command and tries again, so a write that
+ * stopped halfway never continues on a different tag, and finishes when the
+ * first tag comes back before the attempts run out.
+ *
  * The call blocks the calling task until the tag is configured, the attempts
  * run out, or timeout_ms passes. timeout_ms counts from the call and covers the
  * wait for the reader, PN532 recovery and every tag command. No tag command
@@ -94,11 +99,20 @@ esp_err_t hal_nfc_init(void);
  *         after WriteData, the tag holds the new URL and its SDM state is
  *         not confirmed,
  *         HAL_NFC_ERR_TAG_NOT_DESFIRE for a tag without ISO 14443-4,
- *         HAL_NFC_ERR_NOT_SUPPORTED for a tag without the NDEF application, a tag
- *         that is not an NTAG 424 DNA, or one whose file 02 key 0 may not
- *         reconfigure or that is too small; the tag is left unchanged,
+ *         HAL_NFC_ERR_NOT_SUPPORTED for a tag without a fixed 7-byte UID (Random
+ *         ID turned on), a tag without the NDEF application, a tag that is not
+ *         an NTAG 424 DNA, or one whose file 02 has communication mode bits
+ *         other than 00b (the datasheet also counts 10b as plain, which this
+ *         terminal refuses), may be changed by anyone other than key 0, or is
+ *         too small; the
+ *         call refuses such a tag before WriteData,
  *         HAL_NFC_ERR_AUTH when key 0 is not the factory key,
- *         HAL_NFC_ERR_COMM for any other failure after the attempts run out
+ *         HAL_NFC_ERR_COMM after the attempts run out on a tag other than the
+ *         job's first one, a malformed GetVersion answer (this terminal takes
+ *         only a 14-byte third part, so a tag that adds the optional FabKeyID
+ *         byte ends here), a GetVersion UID that
+ *         differs from the activation UID, or any other failure. A failed call
+ *         may leave the new URL on the job's first tag.
  *
  * @note Place the tag on the PN532 antenna before or while calling
  * @note See the key limitation in the file description

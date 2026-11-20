@@ -173,13 +173,14 @@ static bool retry_is_futile(hal_nfc_err_t err)
            err == HAL_NFC_ERR_SDM_TIMEOUT;
 }
 
-/* GetFileSettings answer: FileType, FileOption, AccessRights (RW|Change, Read|Write), FileSize LE,
- * then SDM fields when SDM is on (NT4H2421Gx datasheet, GetFileSettings) */
+/* GetFileSettings answer: FileType, FileOption (communication mode in bits 0-1), AccessRights (RW|Change,
+ * Read|Write), FileSize LE, then SDM fields when SDM is on (NT4H2421Gx datasheet, GetFileSettings) */
 #define FILE_SETTINGS_MIN_LEN   7
 #define FILE_SETTINGS_MAX_LEN   32
 #define FILE_TYPE_STANDARD      0x00
+#define FILE_COMM_MODE_MASK     0x03
+#define FILE_COMM_PLAIN         0x00
 #define ACCESS_KEY_0            0x0
-#define ACCESS_FREE             0xE
 
 /* GetVersion hardware part of an NTAG 424 DNA: NXP vendor id, NTAG type, hardware major version 0x30
  * (https://github.com/RfidResearchGroup/proxmark3/blob/0bf02faa4964/client/src/cmdhfmfdes.c, getCardType) */
@@ -187,20 +188,36 @@ static bool retry_is_futile(hal_nfc_err_t err)
 #define HW_TYPE_NTAG            0x04
 #define HW_MAJOR_NTAG424        0x30
 
-/**
- * Refuses a tag that is not an NTAG 424 DNA, or whose NDEF file the factory key
- * cannot turn into an SDM file, so WriteData never changes a tag that
- * ChangeFileSettings would then reject.
- */
-static hal_nfc_err_t check_tag(const sdm_ndef_t *ndef)
+/* A tag with Random ID turned on answers anticollision with a single-size 4-byte UID (NT4H2421Gx datasheet,
+ * 8.1.1) */
+static hal_nfc_err_t bind_target(uint8_t target[NFC_UID_LEN])
 {
-    uint8_t hw[NFC_VERSION_HW_LEN];
-    hal_nfc_err_t err = nfc_ev2_get_version(hw);
+    static const uint8_t unset[NFC_UID_LEN];
+    const uint8_t *nfcid = pn532_nfcid(g_nfc.pn532, NULL);
+    bool fixed_uid = nfcid != NULL && nfcid[0] == NFC_UID_LEN;
+    ESP_RETURN_ON_FALSE(memcmp(target, unset, NFC_UID_LEN) == 0 ||
+                        (fixed_uid && memcmp(&nfcid[1], target, NFC_UID_LEN) == 0),
+                        HAL_NFC_ERR_COMM, TAG, "SDM config: another tag is on the reader, waiting for the first one");
+    ESP_RETURN_ON_FALSE(fixed_uid && memcmp(&nfcid[1], unset, NFC_UID_LEN) != 0, HAL_NFC_ERR_NOT_SUPPORTED, TAG,
+                        "SDM config: the tag reports no fixed 7-byte UID");
+    memcpy(target, &nfcid[1], NFC_UID_LEN);
+    return HAL_NFC_OK;
+}
+
+/* ChangeFileSettings goes out in CommMode.Full, which the tag accepts only when key 0 holds the Change right; with
+ * free Change it wants CommMode.Plain (NT4H2421Gx datasheet, 10.7.1). */
+static hal_nfc_err_t verify_tag_before_write(const sdm_ndef_t *ndef, const uint8_t target[NFC_UID_LEN])
+{
+    nfc_version_t version;
+    hal_nfc_err_t err = nfc_ev2_get_version(&version);
     ESP_RETURN_ON_FALSE(err == HAL_NFC_OK, err, TAG, "SDM config: GetVersion failed (%d)", err);
+    const uint8_t *hw = version.hw;
     ESP_RETURN_ON_FALSE(hw[0] == VENDOR_NXP && hw[1] == HW_TYPE_NTAG && hw[3] == HW_MAJOR_NTAG424,
                         HAL_NFC_ERR_NOT_SUPPORTED, TAG,
                         "SDM config: tag reports vendor 0x%02X, type 0x%02X, hardware version 0x%02X; "
                         "it is not an NTAG 424 DNA", hw[0], hw[1], hw[3]);
+    ESP_RETURN_ON_FALSE(memcmp(version.production, target, NFC_UID_LEN) == 0, HAL_NFC_ERR_COMM, TAG,
+                        "SDM config: GetVersion reports another UID than the activated tag");
 
     uint8_t fs[FILE_SETTINGS_MAX_LEN];
     size_t len = sizeof(fs);
@@ -209,18 +226,21 @@ static hal_nfc_err_t check_tag(const sdm_ndef_t *ndef)
     ESP_RETURN_ON_FALSE(len >= FILE_SETTINGS_MIN_LEN, HAL_NFC_ERR_COMM, TAG,
                         "SDM config: GetFileSettings answer of %u bytes is too short", (unsigned)len);
 
+    uint8_t comm_mode = fs[1] & FILE_COMM_MODE_MASK;
     uint8_t change_key = fs[2] & 0x0F;
     uint32_t size = get_le24(&fs[4]);
-    ESP_RETURN_ON_FALSE(fs[0] == FILE_TYPE_STANDARD && size >= ndef->len &&
-                        (change_key == ACCESS_KEY_0 || change_key == ACCESS_FREE),
+    ESP_RETURN_ON_FALSE(fs[0] == FILE_TYPE_STANDARD && comm_mode == FILE_COMM_PLAIN && size >= ndef->len &&
+                        change_key == ACCESS_KEY_0,
                         HAL_NFC_ERR_NOT_SUPPORTED, TAG,
-                        "SDM config: file 02 has type %u, %u bytes and change key %u; it needs a standard file of "
-                        "%u bytes that key 0 may change", fs[0], (unsigned)size, change_key, (unsigned)ndef->len);
+                        "SDM config: file 02 has type %u, communication mode %u, %u bytes and change key %u; it "
+                        "needs a plain standard file of %u bytes that only key 0 may change", fs[0], comm_mode,
+                        (unsigned)size, change_key, (unsigned)ndef->len);
     return HAL_NFC_OK;
 }
 
 /** One pass over a tag; the tag is released on every exit after detection */
-static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_ms, int attempt_no)
+static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint8_t target[NFC_UID_LEN], uint32_t detect_window_ms,
+                                 int attempt_no)
 {
     int64_t t_start = esp_timer_get_time();
     hal_nfc_err_t err = nfc_reader_detect_tag(detect_window_ms);
@@ -235,6 +255,11 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
 
     if (!nfc_reader_tag_is_iso_dep()) {
         err = HAL_NFC_ERR_TAG_NOT_DESFIRE;
+        goto release;
+    }
+
+    err = bind_target(target);
+    if (err != HAL_NFC_OK) {
         goto release;
     }
 
@@ -270,7 +295,7 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
     }
     t_select = esp_timer_get_time();
 
-    err = check_tag(ndef);
+    err = verify_tag_before_write(ndef, target);
     if (err != HAL_NFC_OK) {
         goto release;
     }
@@ -338,6 +363,7 @@ hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id)
     }
 
     hal_nfc_err_t err = HAL_NFC_ERR_NO_TAG;
+    uint8_t target[NFC_UID_LEN] = {0};
 
     for (int attempt = 1; attempt <= SDM_MAX_ATTEMPTS; attempt++) {
         if (attempt > 1 && !nfc_deadline_passed()) {
@@ -362,7 +388,7 @@ hal_nfc_err_t nfc_sdm_configure_locked(const char *device_id)
             window_ms = (uint32_t)left_ms;
         }
 
-        err = sdm_attempt(&ndef, window_ms, attempt);
+        err = sdm_attempt(&ndef, target, window_ms, attempt);
         if (err == HAL_NFC_OK || retry_is_futile(err)) {
             break;
         }
