@@ -136,9 +136,9 @@ Service UUID: `67cb0001-25fe-42d1-9fce-8bf97986312f`
 
 ### Pairing and writes
 
-The three write characteristics need an encrypted link. The device pairs with LE Secure Connections using Just Works (no passkey) and stores the bond in NVS. DEVICE_INFO can be read without pairing.
+The three write characteristics, and switching on their notifications, need an encrypted link. The device pairs with LE Secure Connections using Just Works (no passkey) and stores the bond in NVS. DEVICE_INFO can be read without pairing.
 
-- A write on an unencrypted link fails with an ATT error (ATT is the attribute protocol that GATT writes use). The code is `0x05` when the device has no stored key for the phone and `0x0F` when it has one. Both make the phone start pairing or encrypt the link, and the client repeats the write.
+- A write, or a notification switch, on an unencrypted link fails with an ATT error (ATT is the attribute protocol that GATT writes use). The code is `0x05` when the device has no stored key for the phone and `0x0F` when it has one. Both make the phone start pairing or encrypt the link, and the client repeats the write.
 - Writes use the acknowledged ATT write, so the client sees errors.
 - Enable notifications (the CCCD, the descriptor that switches notifications on) on a characteristic before you write to it. Without that, the write fails with ATT error `0xFD`, because the device could not send its reply.
 - Request an ATT MTU (the largest packet the link carries) of at least 100 bytes. A notification must fit in MTU minus 3 bytes. The device cannot start the MTU exchange itself. With a smaller MTU, a write fails with ATT error `0xFC`.
@@ -247,7 +247,7 @@ The result arrives as one notification:
 | 1007 | `unsupported_tag_capability` | The tag lacks a required capability, for example the NDEF application |
 | 1099 | `sdm_config_failed` | Any other failure, such as a framing error or an unexpected status from the tag |
 
-Code 1099 also comes with `nfc_config_busy` (a tag write is already running), `not_onboarding` (the device left onboarding while the client stayed connected) and `nfc_config_task_create_failed` (out of memory). A WIFI_CONFIG sent during a tag write or outside onboarding gets a WIFI_CONFIG failure notification. The device sends no result when the client disconnects before the write ends, or when the client has not enabled notifications on URL_SET.
+Code 1099 also comes with `nfc_config_busy` (a tag write is already running), `not_onboarding` (the device left onboarding while the client stayed connected) and `nfc_config_task_create_failed` (out of memory). A WIFI_CONFIG sent during a tag write or outside onboarding gets a WIFI_CONFIG failure notification. The device sends no result when the client disconnects before the write ends, or when the client turned notifications off on URL_SET during the write. A result goes only to the connection that sent the request, never to a client that connected later.
 
 ## SDM URL and backend verification
 

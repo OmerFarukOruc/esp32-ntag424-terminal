@@ -182,13 +182,14 @@ The device does not leave onboarding on its own. Enter it again before you conti
 3. Enable notifications on WIFI_SCAN, WIFI_CONFIG, and URL_SET.
 4. Write any byte to WIFI_SCAN.
 
-Expect `hal_ble: BLE connected, conn_handle=<n>`, `MTU update: conn_handle=<n>, mtu=<n>`, and one `Subscribe: conn_handle=<n> attr_handle=<n> notify:0->1` line for each characteristic you enabled. The write in step 4 fails with ATT error `0x05` (Insufficient Authentication) on a phone the device has no key for, or `0x0F` (Insufficient Encryption) on a phone it has a key for. The phone offers to pair, and after pairing the log shows `Encryption change: conn_handle=<n>, status=0`.
+Expect `hal_ble: BLE connected, conn_handle=<n>` and `MTU update: conn_handle=<n>, mtu=<n>`. Enabling notifications in step 3 fails with ATT error `0x05` (Insufficient Authentication) on a phone the device has no key for, or `0x0F` (Insufficient Encryption) on a phone it has a key for. The phone offers to pair, and after pairing the log shows `Encryption change: conn_handle=<n>, status=0` and one `Subscribe: conn_handle=<n> attr_handle=<n> notify:0->1` line for each characteristic you enabled. The write in step 4 then starts a scan.
 
 | Check | Expected | Status |
 |-------|----------|--------|
 | DEVICE_INFO without pairing | JSON with `name` (`TERMINAL-XXXX`), `deviceId`, `version` | [ ] |
 | Id before URL_SET | `deviceId` is the last two Bluetooth MAC bytes in hex | [ ] |
 | Write before pairing | ATT error `0x05` for a phone with no bond, `0x0F` for a phone with a bond the device kept | [ ] |
+| Notifications before pairing | Enabling notifications fails with the same ATT errors as a write | [ ] |
 | Pairing | Just Works, no passkey prompt | [ ] |
 | Write after pairing | Accepted | [ ] |
 | Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not one JSON value (<n> bytes)` | [ ] |
@@ -264,7 +265,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | Notification | `{"success":true,"code":0,"message":"sdm_configured"}` | [ ] |
 | Stored id | The id is saved after the write succeeds. DEVICE_INFO now shows `TEST123` as `deviceId`. | [ ] |
 | Repeat on the same tag | The device releases the tag after a successful write. Write a second id right away and expect success again with a clean detect. This is not confirmed on hardware. | [ ] |
-| No notifications | With notifications off on URL_SET, the tag is still written, the LED and buzzer show success, and the log shows `Client has not enabled notifications on this characteristic` | [ ] |
+| No notifications | With notifications off on URL_SET, the write fails with ATT error `0xFD` and no tag write starts | [ ] |
 
 #### Failures
 
@@ -280,6 +281,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | Second URL_SET while one runs | At once, code 1099 `nfc_config_busy`, log `URL_SET rejected: nfc_config_busy` | [ ] |
 | WIFI_CONFIG during the write | Notification `{"success":false,"ip":"","msg":"WiFi connection failed"}`, log `WiFi config rejected: a tag write is running`, and the write goes on | [ ] |
 | Disconnect the BLE client during the write | The write still ends, log `URL_SET attempt #<n>: BLE disconnected before the result, not sent` | [ ] |
+| Disconnect and connect again during the write | Connect again, pair, and enable notifications on URL_SET before the write ends. No URL_SET result reaches the new connection, and the log shows the line of the row above. | [ ] |
 | Short press or 3 s hold during the write | Nothing changes. The state stays WRITING_TAG until the write ends. | [ ] |
 | Hold the button 10 s during the write | `Factory reset refused: a tag write is running` | [ ] |
 

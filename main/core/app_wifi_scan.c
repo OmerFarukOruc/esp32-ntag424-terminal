@@ -5,6 +5,7 @@
  */
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -31,7 +32,7 @@ static const char *const s_security_names[] = {
 
 static void wifi_scan_task(void *arg)
 {
-    (void)arg;
+    hal_ble_session_t session = (hal_ble_session_t)(uintptr_t)arg;
     hal_wifi_ap_t aps[HAL_WIFI_SCAN_MAX];
     hal_ble_wifi_scan_result_t results[HAL_WIFI_SCAN_MAX];
     uint16_t count = 0;
@@ -53,7 +54,7 @@ static void wifi_scan_task(void *arg)
 
     /* A failed scan reports an empty result, so the client does not wait for it. */
     ESP_LOGI(TAG, "Scan complete, found %u networks", (unsigned)count);
-    err = hal_ble_send_wifi_scan_results(results, count);
+    err = hal_ble_send_wifi_scan_results(session, results, count);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send scan results: %s", esp_err_to_name(err));
     }
@@ -62,16 +63,17 @@ static void wifi_scan_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void app_wifi_scan_start(void)
+void app_wifi_scan_start(hal_ble_session_t session)
 {
     if (atomic_exchange(&s_scanning, true)) {
         ESP_LOGW(TAG, "Scan request ignored: a scan is already running");
         return;
     }
 
-    if (xTaskCreate(wifi_scan_task, "wifi_scan", SCAN_TASK_STACK, NULL, SCAN_TASK_PRIORITY, NULL) != pdPASS) {
+    if (xTaskCreate(wifi_scan_task, "wifi_scan", SCAN_TASK_STACK, (void *)(uintptr_t)session, SCAN_TASK_PRIORITY,
+                    NULL) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create the scan task");
         atomic_store(&s_scanning, false);
-        hal_ble_send_wifi_scan_results(NULL, 0);
+        hal_ble_send_wifi_scan_results(session, NULL, 0);
     }
 }

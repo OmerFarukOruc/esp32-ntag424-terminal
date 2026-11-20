@@ -62,6 +62,9 @@ void ble_store_config_init(void);
 #define ATT_ERR_WRITE_REQUEST_REJECTED 0xFC
 #define ATT_ERR_CCCD_IMPROPER 0xFD
 #define REPLY_MIN_MTU 100
+/* The request characteristics: writes and notification switches both need an encrypted link. */
+#define REQUEST_CHR_FLAGS (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_NOTIFY | \
+                           BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC)
 #define NAME_PREFIX "TERMINAL"
 #define NAME_SUFFIX_LEN 5  /* "-" and the last two Bluetooth MAC bytes in hex */
 #define ADV_INTERVAL_MS 100
@@ -85,7 +88,10 @@ typedef struct {
 
 static atomic_bool s_initialized;
 static atomic_bool s_adv_wanted;  /* True from start_advertising until stop_advertising */
-static _Atomic uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+/* The connection handle in the low 16 bits and a count of connections in the high 16 bits, so a
+ * handle that NimBLE reuses for a later client gives another session. */
+static _Atomic hal_ble_session_t s_session = HAL_BLE_SESSION_NONE;
+static uint16_t s_connection_count;  /* Only the host task touches it */
 static uint8_t s_own_addr_type;
 static struct ble_npl_event s_adv_event;
 
@@ -114,15 +120,21 @@ static int reply_possible(uint16_t conn_handle, notify_chr_t *chr)
     return 0;
 }
 
-/* Hands the request to the application. Returns 0 when it was queued, otherwise an ATT error code. */
+/* Hands the request of the connected client to the application. Returns 0 when it was queued,
+ * otherwise an ATT error code. */
 static int admit(hal_ble_event_t event, const void *data, size_t data_len)
 {
-    esp_err_t err = s_event_cb(event, data, data_len);
+    esp_err_t err = s_event_cb(event, atomic_load(&s_session), data, data_len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Request %d not queued: %s", (int)event, esp_err_to_name(err));
         return BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     return 0;
+}
+
+static uint16_t session_conn_handle(hal_ble_session_t session)
+{
+    return (uint16_t)(session & 0xFFFF);
 }
 
 static int device_info_chr_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -148,17 +160,17 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
             }, {
                 .uuid = &wifi_scan_chr_uuid.u,
                 .access_cb = wifi_scan_chr_access,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_NOTIFY,
+                .flags = REQUEST_CHR_FLAGS,
                 .val_handle = &s_wifi_scan.val_handle,
             }, {
                 .uuid = &wifi_config_chr_uuid.u,
                 .access_cb = wifi_config_chr_access,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_NOTIFY,
+                .flags = REQUEST_CHR_FLAGS,
                 .val_handle = &s_wifi_config.val_handle,
             }, {
                 .uuid = &url_set_chr_uuid.u,
                 .access_cb = url_set_chr_access,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_NOTIFY,
+                .flags = REQUEST_CHR_FLAGS,
                 .val_handle = &s_url_set.val_handle,
             },
             { 0 },
@@ -424,7 +436,7 @@ static void adv_reconcile(void)
         }
         return;
     }
-    if (!active && atomic_load(&s_conn_handle) == BLE_HS_CONN_HANDLE_NONE) {
+    if (!active && atomic_load(&s_session) == HAL_BLE_SESSION_NONE) {
         (void)adv_start();
     }
 }
@@ -440,7 +452,8 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             ESP_LOGI(TAG, "BLE connected, conn_handle=%d", event->connect.conn_handle);
-            atomic_store(&s_conn_handle, event->connect.conn_handle);
+            s_connection_count++;
+            atomic_store(&s_session, ((hal_ble_session_t)s_connection_count << 16) | event->connect.conn_handle);
         } else {
             ESP_LOGW(TAG, "BLE connection failed, status=%d", event->connect.status);
             adv_reconcile();
@@ -449,7 +462,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "BLE disconnected, reason=%d", event->disconnect.reason);
-        atomic_store(&s_conn_handle, BLE_HS_CONN_HANDLE_NONE);
+        atomic_store(&s_session, HAL_BLE_SESSION_NONE);
         for (size_t i = 0; i < sizeof(s_notify_chrs) / sizeof(s_notify_chrs[0]); i++) {
             atomic_store(&s_notify_chrs[i]->subscribed, false);
         }
@@ -626,19 +639,19 @@ esp_err_t hal_ble_stop_advertising(void)
 
 esp_err_t hal_ble_disconnect(void)
 {
-    uint16_t conn = atomic_load(&s_conn_handle);
-    if (conn == BLE_HS_CONN_HANDLE_NONE) {
+    hal_ble_session_t session = atomic_load(&s_session);
+    if (session == HAL_BLE_SESSION_NONE) {
         return ESP_OK;
     }
 
-    int rc = ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+    int rc = ble_gap_terminate(session_conn_handle(session), BLE_ERR_REM_USER_CONN_TERM);
     ESP_RETURN_ON_FALSE(rc == 0 || rc == BLE_HS_ENOTCONN, nimble_to_esp(rc), TAG, "Failed to disconnect: %d", rc);
     return ESP_OK;
 }
 
-bool hal_ble_is_connected(void)
+bool hal_ble_session_is_current(hal_ble_session_t session)
 {
-    return atomic_load(&s_conn_handle) != BLE_HS_CONN_HANDLE_NONE;
+    return session != HAL_BLE_SESSION_NONE && atomic_load(&s_session) == session;
 }
 
 /* Returns the object when it was built whole, otherwise frees it and returns NULL. */
@@ -651,18 +664,20 @@ static cJSON *built_or_null(cJSON *json, bool built)
     return json;
 }
 
-/* Serializes json (taking ownership) into the ATT payload limit and notifies. A NULL json means the
- * caller failed to build it. Returns ESP_ERR_INVALID_SIZE when the object does not fit in
- * ATT MTU - 3 bytes and ESP_ERR_INVALID_STATE without a connection or a subscription. Waits briefly
- * when the stack is out of buffers, so it must not run on the NimBLE host task. */
-static esp_err_t notify_json(notify_chr_t *chr, cJSON *json)
+/* Serializes json (taking ownership) into the ATT payload limit and notifies the client of session.
+ * A NULL json means the caller failed to build it. Returns ESP_ERR_INVALID_SIZE when the object does
+ * not fit in ATT MTU - 3 bytes and ESP_ERR_INVALID_STATE when that client is gone or has no
+ * subscription. Waits briefly when the stack is out of buffers, so it must not run on the NimBLE
+ * host task. */
+static esp_err_t notify_json(notify_chr_t *chr, hal_ble_session_t session, cJSON *json)
 {
     char buf[NOTIFY_BUF_SIZE];
     esp_err_t ret = ESP_OK;
-    uint16_t conn = atomic_load(&s_conn_handle);
+    uint16_t conn = session_conn_handle(session);
 
     ESP_GOTO_ON_FALSE(json != NULL, ESP_ERR_NO_MEM, out, TAG, "Failed to build notification");
-    ESP_GOTO_ON_FALSE(conn != BLE_HS_CONN_HANDLE_NONE, ESP_ERR_INVALID_STATE, out, TAG, "No BLE connection");
+    ESP_GOTO_ON_FALSE(hal_ble_session_is_current(session), ESP_ERR_INVALID_STATE, out, TAG,
+                      "The client that sent the request is gone");
     ESP_GOTO_ON_FALSE(atomic_load(&chr->subscribed), ESP_ERR_INVALID_STATE, out, TAG,
                       "Client has not enabled notifications on this characteristic");
 
@@ -693,11 +708,13 @@ out:
     return ret;
 }
 
-esp_err_t hal_ble_send_wifi_scan_results(const hal_ble_wifi_scan_result_t *results, size_t count)
+esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t session, const hal_ble_wifi_scan_result_t *results,
+                                         size_t count)
 {
     ESP_RETURN_ON_FALSE(atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "not initialized");
     ESP_RETURN_ON_FALSE(results != NULL || count == 0, ESP_ERR_INVALID_ARG, TAG, "results is NULL");
-    ESP_RETURN_ON_FALSE(hal_ble_is_connected(), ESP_ERR_INVALID_STATE, TAG, "No BLE connection");
+    ESP_RETURN_ON_FALSE(hal_ble_session_is_current(session), ESP_ERR_INVALID_STATE, TAG,
+                        "The client that asked for the scan is gone");
 
     size_t sent = 0;
     size_t skipped = 0;
@@ -709,7 +726,7 @@ esp_err_t hal_ble_send_wifi_scan_results(const hal_ble_wifi_scan_result_t *resul
                      cJSON_AddNumberToObject(item, "rssi", results[i].rssi) &&
                      cJSON_AddStringToObject(item, "sec", results[i].security) &&
                      cJSON_AddNumberToObject(item, "ch", results[i].channel);
-        esp_err_t err = notify_json(&s_wifi_scan, built_or_null(item, built));
+        esp_err_t err = notify_json(&s_wifi_scan, session, built_or_null(item, built));
         if (err == ESP_ERR_INVALID_SIZE) {
             skipped++;
             continue;
@@ -728,7 +745,7 @@ esp_err_t hal_ble_send_wifi_scan_results(const hal_ble_wifi_scan_result_t *resul
                  cJSON_AddTrueToObject(done, "done") &&
                  cJSON_AddNumberToObject(done, "count", (double)sent) &&
                  cJSON_AddNumberToObject(done, "skipped", (double)skipped);
-    esp_err_t done_err = notify_json(&s_wifi_scan, built_or_null(done, built));
+    esp_err_t done_err = notify_json(&s_wifi_scan, session, built_or_null(done, built));
     if (first_err != ESP_OK) {
         return first_err;
     }
@@ -738,7 +755,8 @@ esp_err_t hal_ble_send_wifi_scan_results(const hal_ble_wifi_scan_result_t *resul
     return ESP_OK;
 }
 
-esp_err_t hal_ble_send_wifi_config_result(bool success, const char *ip_addr, const char *message)
+esp_err_t hal_ble_send_wifi_config_result(hal_ble_session_t session, bool success, const char *ip_addr,
+                                          const char *message)
 {
     ESP_RETURN_ON_FALSE(atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
@@ -747,10 +765,10 @@ esp_err_t hal_ble_send_wifi_config_result(bool success, const char *ip_addr, con
                  cJSON_AddBoolToObject(json, "success", success) &&
                  cJSON_AddStringToObject(json, "ip", ip_addr ? ip_addr : "") &&
                  cJSON_AddStringToObject(json, "msg", message ? message : "");
-    return notify_json(&s_wifi_config, built_or_null(json, built));
+    return notify_json(&s_wifi_config, session, built_or_null(json, built));
 }
 
-esp_err_t hal_ble_send_url_set_result(bool success, int32_t code, const char *message)
+esp_err_t hal_ble_send_url_set_result(hal_ble_session_t session, bool success, int32_t code, const char *message)
 {
     ESP_RETURN_ON_FALSE(atomic_load(&s_initialized), ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
@@ -759,7 +777,7 @@ esp_err_t hal_ble_send_url_set_result(bool success, int32_t code, const char *me
                  cJSON_AddBoolToObject(json, "success", success) &&
                  cJSON_AddNumberToObject(json, "code", code) &&
                  cJSON_AddStringToObject(json, "message", message ? message : "");
-    return notify_json(&s_url_set, built_or_null(json, built));
+    return notify_json(&s_url_set, session, built_or_null(json, built));
 }
 
 esp_err_t hal_ble_deinit(void)
@@ -770,7 +788,7 @@ esp_err_t hal_ble_deinit(void)
 
     hal_ble_stop_advertising();
     hal_ble_disconnect();
-    atomic_store(&s_conn_handle, BLE_HS_CONN_HANDLE_NONE);
+    atomic_store(&s_session, HAL_BLE_SESSION_NONE);
 
     int rc = nimble_port_stop();
     if (rc != 0) {

@@ -52,6 +52,7 @@ static struct {
     char device_id[HAL_NFC_DEVICE_ID_MAX_LEN + 1];
     uint32_t attempt_id;
     int64_t started_us;
+    hal_ble_session_t session;
     bool ble_connected_start;
 } s_job;
 
@@ -80,9 +81,9 @@ static url_set_result_t map_result(hal_nfc_err_t nfc_err)
     }
 }
 
-static void send_result(url_set_result_t result)
+static void send_result(hal_ble_session_t session, url_set_result_t result)
 {
-    esp_err_t err = hal_ble_send_url_set_result(result.code == URL_SET_OK, result.code, result.message);
+    esp_err_t err = hal_ble_send_url_set_result(session, result.code == URL_SET_OK, result.code, result.message);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send the URL_SET result over BLE: %s", esp_err_to_name(err));
     }
@@ -134,17 +135,17 @@ static void nfc_config_task(void *arg)
     vTaskDelete(NULL);
 }
 
-void app_url_set_reject(const char *reason)
+void app_url_set_reject(hal_ble_session_t session, const char *reason)
 {
     ESP_LOGW(TAG, "URL_SET rejected: %s", reason);
-    send_result(RESULT(URL_SET_FAILED, reason));
+    send_result(session, RESULT(URL_SET_FAILED, reason));
 }
 
-bool app_url_set_start(const char *device_id, size_t len)
+bool app_url_set_start(hal_ble_session_t session, const char *device_id, size_t len)
 {
     if (!hal_nfc_device_id_valid(device_id, len)) {
         ESP_LOGW(TAG, "URL_SET rejected: invalid device id (%u bytes)", (unsigned)len);
-        send_result(map_result(HAL_NFC_ERR_INVALID_PARAM));
+        send_result(session, map_result(HAL_NFC_ERR_INVALID_PARAM));
         return false;
     }
 
@@ -152,11 +153,12 @@ bool app_url_set_start(const char *device_id, size_t len)
     s_job.device_id[len] = '\0';
     s_job.attempt_id++;
     s_job.started_us = esp_timer_get_time();
-    s_job.ble_connected_start = hal_ble_is_connected();
+    s_job.session = session;
+    s_job.ble_connected_start = hal_ble_session_is_current(session);
 
     if (xTaskCreate(nfc_config_task, "nfc_cfg", NFC_TASK_STACK, NULL, NFC_TASK_PRIORITY, NULL) != pdPASS) {
         ESP_LOGE(TAG, "URL_SET attempt #%lu: creating the tag task failed", (unsigned long)s_job.attempt_id);
-        send_result(RESULT(URL_SET_FAILED, "nfc_config_task_create_failed"));
+        send_result(session, RESULT(URL_SET_FAILED, "nfc_config_task_create_failed"));
         return false;
     }
     ESP_LOGI(TAG, "URL_SET attempt #%lu start: device_id=%s", (unsigned long)s_job.attempt_id, s_job.device_id);
@@ -168,7 +170,7 @@ bool app_url_set_finish(hal_nfc_err_t nfc_err)
     bool success = (nfc_err == HAL_NFC_OK);
     url_set_result_t result = map_result(nfc_err);
     uint32_t duration_ms = (uint32_t)((esp_timer_get_time() - s_job.started_us) / 1000);
-    bool ble_connected_end = hal_ble_is_connected();
+    bool ble_connected_end = hal_ble_session_is_current(s_job.session);
 
     if (success) {
         /* The id belongs to the tag, so it is stored only after the tag accepted it. */
@@ -182,7 +184,7 @@ bool app_url_set_finish(hal_nfc_err_t nfc_err)
     }
 
     if (ble_connected_end) {
-        send_result(result);
+        send_result(s_job.session, result);
     } else {
         ESP_LOGW(TAG, "URL_SET attempt #%lu: BLE disconnected before the result, not sent",
                  (unsigned long)s_job.attempt_id);

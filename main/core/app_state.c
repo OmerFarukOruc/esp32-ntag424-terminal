@@ -50,6 +50,7 @@ typedef enum {
 
 typedef struct {
     app_event_t event;
+    hal_ble_session_t session;  /* The BLE client of a request, HAL_BLE_SESSION_NONE for other events */
     size_t data_len;
     uint8_t data[EVENT_DATA_MAX];
 } event_msg_t;
@@ -90,18 +91,20 @@ static const char *const s_event_names[APP_EVENT_COUNT] = {
 static app_state_t s_state = APP_STATE_INIT;
 static bool s_critical_battery_pending;  /* The tag write refused a deep sleep */
 static bool s_low_battery_pending;       /* The warning came outside IDLE */
+static hal_ble_session_t s_wifi_session = HAL_BLE_SESSION_NONE;  /* The client waiting for the WiFi result */
 
 static QueueHandle_t s_event_queue;
 static bool s_boot_fault;  /* Written before INIT_COMPLETE is queued, read by the state task after */
 static atomic_uint s_consecutive_overflows;
 static atomic_bool s_overflow_alarm;
 
-static esp_err_t post_event(app_event_t event, const void *data, size_t data_len, TickType_t wait)
+static esp_err_t post_event(app_event_t event, hal_ble_session_t session, const void *data, size_t data_len,
+                            TickType_t wait)
 {
     ESP_RETURN_ON_FALSE(s_event_queue != NULL, ESP_ERR_INVALID_STATE, TAG, "Event queue not created");
     ESP_RETURN_ON_FALSE(data_len <= EVENT_DATA_MAX, ESP_ERR_INVALID_SIZE, TAG, "Event data too large");
 
-    event_msg_t msg = {.event = event, .data_len = data_len};
+    event_msg_t msg = {.event = event, .session = session, .data_len = data_len};
     if (data_len > 0) {
         memcpy(msg.data, data, data_len);
     }
@@ -129,12 +132,12 @@ static esp_err_t post_event(app_event_t event, const void *data, size_t data_len
 
 esp_err_t app_post_event(app_event_t event, const void *data, size_t data_len)
 {
-    return post_event(event, data, data_len, 0);
+    return post_event(event, HAL_BLE_SESSION_NONE, data, data_len, 0);
 }
 
 esp_err_t app_post_event_wait(app_event_t event, const void *data, size_t data_len)
 {
-    return post_event(event, data, data_len, portMAX_DELAY);
+    return post_event(event, HAL_BLE_SESSION_NONE, data, data_len, portMAX_DELAY);
 }
 
 static void button_callback(hal_button_event_t event, uint32_t hold_time_ms)
@@ -175,15 +178,16 @@ static void wifi_event_callback(hal_wifi_state_t state)
 }
 
 /* Runs on the NimBLE host task: it only queues the request for the state task. */
-static esp_err_t ble_event_callback(hal_ble_event_t event, const void *data, size_t data_len)
+static esp_err_t ble_event_callback(hal_ble_event_t event, hal_ble_session_t session, const void *data,
+                                    size_t data_len)
 {
     switch (event) {
     case HAL_BLE_EVENT_WIFI_SCAN_REQ:
-        return app_post_event(APP_EVENT_WIFI_SCAN_REQUESTED, NULL, 0);
+        return post_event(APP_EVENT_WIFI_SCAN_REQUESTED, session, NULL, 0, 0);
     case HAL_BLE_EVENT_WIFI_CONFIG:
-        return app_post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, data, data_len);
+        return post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, session, data, data_len, 0);
     case HAL_BLE_EVENT_URL_SET:
-        return app_post_event(APP_EVENT_URL_SET, data, data_len);
+        return post_event(APP_EVENT_URL_SET, session, data, data_len, 0);
     }
     return ESP_ERR_INVALID_ARG;
 }
@@ -317,12 +321,13 @@ static void power_down(void)
     hal_power_deep_sleep();
 }
 
-static void send_wifi_result(bool success)
+static void send_wifi_result(hal_ble_session_t session, bool success)
 {
-    hal_ble_send_wifi_config_result(success, NULL, success ? "WiFi connected successfully" : "WiFi connection failed");
+    hal_ble_send_wifi_config_result(session, success, NULL,
+                                    success ? "WiFi connected successfully" : "WiFi connection failed");
 }
 
-static void handle_wifi_config(const void *data, size_t data_len)
+static void handle_wifi_config(hal_ble_session_t session, const void *data, size_t data_len)
 {
     if (data_len != sizeof(hal_ble_wifi_config_t)) {
         ESP_LOGW(TAG, "WiFi config ignored: unexpected size %u", (unsigned)data_len);
@@ -341,9 +346,10 @@ static void handle_wifi_config(const void *data, size_t data_len)
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed to start: %s", esp_err_to_name(err));
-        send_wifi_result(false);
+        send_wifi_result(session, false);
         return;
     }
+    s_wifi_session = session;
     transition_to(APP_STATE_CONNECTING_WIFI, APP_EVENT_WIFI_CONFIG_RECEIVED);
 }
 
@@ -364,7 +370,7 @@ static void finish_tag_write(const void *data)
     }
 }
 
-static void handle_state_event(app_event_t event, const void *data, size_t data_len)
+static void handle_state_event(app_event_t event, hal_ble_session_t session, const void *data, size_t data_len)
 {
     switch (s_state) {
     case APP_STATE_INIT:
@@ -391,13 +397,13 @@ static void handle_state_event(app_event_t event, const void *data, size_t data_
             transition_to(APP_STATE_IDLE, event);
             break;
         case APP_EVENT_WIFI_CONFIG_RECEIVED:
-            handle_wifi_config(data, data_len);
+            handle_wifi_config(session, data, data_len);
             break;
         case APP_EVENT_WIFI_SCAN_REQUESTED:
-            app_wifi_scan_start();
+            app_wifi_scan_start(session);
             break;
         case APP_EVENT_URL_SET:
-            if (app_url_set_start(data, data_len)) {
+            if (app_url_set_start(session, data, data_len)) {
                 transition_to(APP_STATE_WRITING_TAG, event);
             }
             break;
@@ -410,14 +416,14 @@ static void handle_state_event(app_event_t event, const void *data, size_t data_
         /* The write ends with URL_SET_DONE. Buttons wait until then. */
         switch (event) {
         case APP_EVENT_URL_SET:
-            app_url_set_reject("nfc_config_busy");
+            app_url_set_reject(session, "nfc_config_busy");
             break;
         case APP_EVENT_WIFI_CONFIG_RECEIVED:
             ESP_LOGW(TAG, "WiFi config rejected: a tag write is running");
-            send_wifi_result(false);
+            send_wifi_result(session, false);
             break;
         case APP_EVENT_WIFI_SCAN_REQUESTED:
-            app_wifi_scan_start();
+            app_wifi_scan_start(session);
             break;
         default:
             break;
@@ -426,13 +432,13 @@ static void handle_state_event(app_event_t event, const void *data, size_t data_
 
     case APP_STATE_CONNECTING_WIFI:
         if (event == APP_EVENT_WIFI_CONNECTED) {
-            send_wifi_result(true);
+            send_wifi_result(s_wifi_session, true);
             transition_to(APP_STATE_IDLE, event);
         } else if (event == APP_EVENT_WIFI_DISCONNECTED) {
             /* An event queued before this connect attempt must not end it. */
             hal_wifi_state_t wifi_state = hal_wifi_get_state();
             if (wifi_state != HAL_WIFI_STATE_CONNECTING && wifi_state != HAL_WIFI_STATE_CONNECTED) {
-                send_wifi_result(false);
+                send_wifi_result(s_wifi_session, false);
                 transition_to(APP_STATE_IDLE, event);
             }
         } else if (event == APP_EVENT_BUTTON_SHORT) {
@@ -493,12 +499,12 @@ static void handle_event(const event_msg_t *msg)
         if (s_state != APP_STATE_ONBOARDING_BLE && s_state != APP_STATE_WRITING_TAG) {
             ESP_LOGW(TAG, "%s rejected in state %s", s_event_names[msg->event], s_state_names[s_state]);
             if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
-                send_wifi_result(false);
+                send_wifi_result(msg->session, false);
             } else if (msg->event == APP_EVENT_URL_SET) {
-                app_url_set_reject("not_onboarding");
+                app_url_set_reject(msg->session, "not_onboarding");
             } else {
                 /* An empty result still carries the done terminator the client waits for. */
-                hal_ble_send_wifi_scan_results(NULL, 0);
+                hal_ble_send_wifi_scan_results(msg->session, NULL, 0);
             }
             return;
         }
@@ -507,7 +513,7 @@ static void handle_event(const event_msg_t *msg)
         break;
     }
 
-    handle_state_event(msg->event, msg->data, msg->data_len);
+    handle_state_event(msg->event, msg->session, msg->data, msg->data_len);
 }
 
 static void state_machine_task(void *arg)

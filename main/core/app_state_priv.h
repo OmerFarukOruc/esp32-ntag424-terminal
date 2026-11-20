@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "hal_ble.h"
 #include "hal_nfc.h"
 
 typedef enum {
@@ -58,14 +59,14 @@ esp_err_t app_device_id_publish(void);
 
 /**
  * Handle a URL_SET request: validate the id and start the tag write task. On an invalid id or a task
- * failure it answers the BLE client itself.
+ * failure it answers the BLE client itself. The result goes only to the client of session.
  *
  * @return true when the tag task runs and will post URL_SET_DONE
  */
-bool app_url_set_start(const char *device_id, size_t len);
+bool app_url_set_start(hal_ble_session_t session, const char *device_id, size_t len);
 
 /** Answer a URL_SET request that cannot run; the reason becomes the result message. */
-void app_url_set_reject(const char *reason);
+void app_url_set_reject(hal_ble_session_t session, const char *reason);
 
 /**
  * Handle the end of the tag write: BLE result, stored id and diagnostics. The caller owns the feedback.
@@ -74,7 +75,7 @@ void app_url_set_reject(const char *reason);
  */
 bool app_url_set_finish(hal_nfc_err_t nfc_err);
 
-/** Start a WiFi scan for the BLE client unless one runs. The scan result goes out over BLE. */
-void app_wifi_scan_start(void);
+/** Start a WiFi scan for the BLE client of session unless one runs. The scan result goes to that client. */
+void app_wifi_scan_start(hal_ble_session_t session);
 
 #endif /* APP_STATE_PRIV_H */

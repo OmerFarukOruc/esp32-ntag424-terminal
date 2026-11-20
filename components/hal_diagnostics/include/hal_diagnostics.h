@@ -56,8 +56,8 @@ typedef struct {
     uint32_t attempt_id;
     int32_t nfc_err;
     int32_t result_code;
-    bool ble_connected_start;
-    bool ble_connected_end;
+    bool ble_connected_start;   /**< The client that sent URL_SET was connected when the write started */
+    bool ble_connected_end;     /**< That client was still connected when the write ended */
     uint32_t duration_ms;
 } hal_diagnostics_url_set_t;
 
