@@ -358,7 +358,7 @@ CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and 
 
 - `pre-commit` runs the pre-commit stage hooks except `gitleaks`.
 - `gitleaks` scans the full git history.
-- `build` runs in the `espressif/idf:v6.1` container once per configuration: `default` builds `sdkconfig.defaults`, and each other leg adds one `sdkconfig.ci.*` file on top. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build. Each leg fails when the build changes `dependencies.lock`, and keeps its ccache folder in the GitHub Actions cache for the next run. The `default` leg uploads the firmware files.
+- `build` runs in the `espressif/idf:v6.1` container once per configuration: `default` builds `sdkconfig.defaults`, and each other leg adds one `sdkconfig.ci.*` file on top. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build. Each leg fails when the build changes `dependencies.lock`, and restores its ccache folder from the GitHub Actions cache. Only runs on `main` save that folder, so pull requests and tags reuse the compiler output of the newest `main` run. The `default` leg uploads the firmware files.
 - `host-tests` runs `test/host/run.sh` in the same container.
 - `publish` runs only for a `v*` tag, and only after the other four jobs pass.
 

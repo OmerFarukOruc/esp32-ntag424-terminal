@@ -52,15 +52,17 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" git --redact --verbose
 
-  # The default configuration builds the release image. Each sdkconfig.ci.* file flips the options the
-  # default leaves on one side of an #if CONFIG_HAL_*, so the other side compiles too.
   build:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        config: [default, passive_buzzer, active_high]
+        include:
+          - config: default
+            release: true
+          - config: passive_buzzer
+          - config: active_high
     container:
       image: espressif/idf:v6.1@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c
     defaults:
@@ -75,15 +77,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-      # The workspace is owned by another user than the container's; git describe sets the firmware version.
-      # The submodule is fetched at depth 1, because its full history is about 200 MB.
-      - name: Fetch the PN532 submodule and point ccache at the workspace
+          fetch-depth: 0 # git describe sets the firmware version
+      # The workspace is owned by another user than the container's.
+      - name: Fetch the PN532 submodule
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule update --init --depth 1
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
           key: ccache-${{ matrix.config }}-${{ github.run_id }}
@@ -91,6 +91,7 @@ jobs:
       - name: Build the ${{ matrix.config }} configuration
         run: |
           . "$IDF_PATH/export.sh"
+          export CCACHE_DIR="$PWD/.ccache"
           ccache --zero-stats
           if [ "$CFG" = default ]; then
             idf.py build
@@ -98,20 +99,24 @@ jobs:
             idf.py -B "build-$CFG" -D SDKCONFIG="build-$CFG/sdkconfig" \
               -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ci.$CFG" build
           fi
+          ccache --show-stats
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.config }}-${{ github.run_id }}
       - name: Check that the build left dependencies.lock unchanged
         run: git diff --exit-code dependencies.lock
-      - name: Show the ccache hit rate
-        run: ccache --show-stats
       # merge-bin depends on the all target, so it builds the firmware first.
       - name: Merge the release image
-        if: matrix.config == 'default' && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.release && startsWith(github.ref, 'refs/tags/v')
         run: . "$IDF_PATH/export.sh" && idf.py merge-bin -o "esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin"
       # The firmware links the GPL-3.0 PN532 library, so the release carries the
       # complete source including the submodule, which GitHub's tag archive omits.
       # The managed components, the resolved sdkconfig and version.txt let the
       # archive rebuild offline with the tag as the firmware version.
       - name: Collect the release files
-        if: matrix.config == 'default' && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.release && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir dist
           printf '%s\n' "$GITHUB_REF_NAME" > version.txt
@@ -120,7 +125,7 @@ jobs:
                 -czf "dist/esp32-ntag424-terminal-${GITHUB_REF_NAME}-source.tar.gz"
           cp "build/esp32-ntag424-terminal-${GITHUB_REF_NAME}.bin" build/esp32-ntag424-terminal.elf dist/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: matrix.config == 'default'
+        if: matrix.release
         with:
           name: firmware
           path: |
@@ -130,7 +135,7 @@ jobs:
             build/partition_table/partition-table.bin
             build/flasher_args.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: matrix.config == 'default' && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.release && startsWith(github.ref, 'refs/tags/v')
         with:
           name: release
           path: dist/*
