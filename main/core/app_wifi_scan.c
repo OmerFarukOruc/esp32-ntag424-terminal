@@ -21,6 +21,7 @@ static const char *TAG = "app_wifi_scan";
 #define SCAN_TASK_PRIORITY  5
 
 static bool s_scanning;
+static hal_ble_session_t s_scan_session;
 
 /* The security names the phone client parses. */
 static const char *const s_security_names[] = {
@@ -76,10 +77,16 @@ void app_wifi_scan_done(void)
 void app_wifi_scan_start(hal_ble_session_t session)
 {
     if (s_scanning) {
-        ESP_LOGW(TAG, "Scan request ignored: a scan is already running");
+        if (session == s_scan_session) {
+            ESP_LOGW(TAG, "Scan request ignored: a scan is already running");
+        } else {
+            ESP_LOGW(TAG, "Scan request refused: a scan for another connection is running");
+            hal_ble_send_wifi_scan_results(session, NULL, 0);
+        }
         return;
     }
     s_scanning = true;
+    s_scan_session = session;
 
     if (xTaskCreate(wifi_scan_task, "wifi_scan", SCAN_TASK_STACK, (void *)(uintptr_t)session, SCAN_TASK_PRIORITY,
                     NULL) != pdPASS) {

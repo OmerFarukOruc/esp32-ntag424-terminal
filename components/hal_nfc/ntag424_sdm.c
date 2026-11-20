@@ -181,15 +181,30 @@ static bool retry_is_futile(hal_nfc_err_t err)
 #define ACCESS_KEY_0            0x0
 #define ACCESS_FREE             0xE
 
+/* GetVersion hardware part of an NTAG 424 DNA: NXP vendor id, NTAG type, hardware major version 0x30
+ * (https://github.com/RfidResearchGroup/proxmark3/blob/0bf02faa4964/client/src/cmdhfmfdes.c, getCardType) */
+#define VENDOR_NXP              0x04
+#define HW_TYPE_NTAG            0x04
+#define HW_MAJOR_NTAG424        0x30
+
 /**
- * Refuses a tag whose NDEF file the factory key cannot turn into an SDM file,
- * so WriteData never changes a tag that ChangeFileSettings would then reject.
+ * Refuses a tag that is not an NTAG 424 DNA, or whose NDEF file the factory key
+ * cannot turn into an SDM file, so WriteData never changes a tag that
+ * ChangeFileSettings would then reject.
  */
-static hal_nfc_err_t check_ndef_file(const sdm_ndef_t *ndef)
+static hal_nfc_err_t check_tag(const sdm_ndef_t *ndef)
 {
+    uint8_t hw[NFC_VERSION_HW_LEN];
+    hal_nfc_err_t err = nfc_ev2_get_version(hw);
+    ESP_RETURN_ON_FALSE(err == HAL_NFC_OK, err, TAG, "SDM config: GetVersion failed (%d)", err);
+    ESP_RETURN_ON_FALSE(hw[0] == VENDOR_NXP && hw[1] == HW_TYPE_NTAG && hw[3] == HW_MAJOR_NTAG424,
+                        HAL_NFC_ERR_NOT_SUPPORTED, TAG,
+                        "SDM config: tag reports vendor 0x%02X, type 0x%02X, hardware version 0x%02X; "
+                        "it is not an NTAG 424 DNA", hw[0], hw[1], hw[3]);
+
     uint8_t fs[FILE_SETTINGS_MAX_LEN];
     size_t len = sizeof(fs);
-    hal_nfc_err_t err = nfc_ev2_get_file_settings(SDM_NDEF_FILE_NO, fs, &len);
+    err = nfc_ev2_get_file_settings(SDM_NDEF_FILE_NO, fs, &len);
     ESP_RETURN_ON_FALSE(err == HAL_NFC_OK, err, TAG, "SDM config: GetFileSettings failed (%d)", err);
     ESP_RETURN_ON_FALSE(len >= FILE_SETTINGS_MIN_LEN, HAL_NFC_ERR_COMM, TAG,
                         "SDM config: GetFileSettings answer of %u bytes is too short", (unsigned)len);
@@ -255,7 +270,7 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
     }
     t_select = esp_timer_get_time();
 
-    err = check_ndef_file(ndef);
+    err = check_tag(ndef);
     if (err != HAL_NFC_OK) {
         goto release;
     }
@@ -288,7 +303,7 @@ static hal_nfc_err_t sdm_attempt(const sdm_ndef_t *ndef, uint32_t detect_window_
 
 release:
     if (err == HAL_NFC_ERR_SDM_TIMEOUT && t_write != 0) {
-        ESP_LOGW(TAG, "SDM config: timeout after WriteData, the NDEF URL is written but SDM is off");
+        ESP_LOGW(TAG, "SDM config: timeout after WriteData, the NDEF URL is written and the SDM state is not confirmed");
     }
     nfc_deadline_allow_cleanup();
     nfc_reader_release_tag();

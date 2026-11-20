@@ -103,6 +103,15 @@ hal_nfc_err_t nfc_select_ndef_app(void);
 /** AuthenticateEV2First with an AES-128 key; fills the session on success */
 hal_nfc_err_t nfc_ev2_authenticate(uint8_t key_no, const uint8_t key[16]);
 
+/** GetVersion hardware part: VendorID, HWType, HWSubType, HWMajorVersion, HWMinorVersion, HWStorageSize,
+ * HWProtocol (NT4H2421Gx datasheet, GetVersion) */
+#define NFC_VERSION_HW_LEN          7
+/** The production part, the longest of the three GetVersion answers, is 14 bytes; room is left for more */
+#define NFC_VERSION_PART_MAX_LEN    16
+
+/** GetVersion before authentication; reads all three parts and returns the hardware part */
+hal_nfc_err_t nfc_ev2_get_version(uint8_t hw_version[NFC_VERSION_HW_LEN]);
+
 /** GetFileSettings before authentication; *len is the buffer size in and the answer length out */
 hal_nfc_err_t nfc_ev2_get_file_settings(uint8_t file_no, uint8_t *settings, size_t *len);
 

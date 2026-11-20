@@ -72,7 +72,7 @@ void app_url_set_reject(hal_ble_session_t session, const char *reason);
 /**
  * Handle the end of the tag write: BLE result, stored id and diagnostics. The caller owns the feedback.
  *
- * @return true when the tag accepted the configuration
+ * @return true when the tag accepted the configuration, NVS stored the id and DEVICE_INFO shows it
  */
 bool app_url_set_finish(hal_nfc_err_t nfc_err);
 

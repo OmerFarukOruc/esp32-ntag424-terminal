@@ -139,31 +139,23 @@ _Static_assert(sizeof(((hal_wifi_credentials_t *)0)->ssid) == sizeof(((hal_ble_w
                sizeof(((hal_wifi_credentials_t *)0)->password) == sizeof(((hal_ble_wifi_config_t *)0)->password),
                "BLE and network credentials must have the same layout");
 
-static void wipe_wifi_slot_locked(void)
-{
-    explicit_bzero(&s_wifi_slot.config, sizeof(s_wifi_slot.config));
-    s_wifi_slot.full = false;
-}
-
 static void wipe_wifi_slot(void)
 {
     portENTER_CRITICAL(&s_wifi_slot.lock);
-    wipe_wifi_slot_locked();
+    explicit_bzero(&s_wifi_slot.config, sizeof(s_wifi_slot.config));
+    s_wifi_slot.full = false;
     portEXIT_CRITICAL(&s_wifi_slot.lock);
 }
 
-/** Moves the waiting credentials into creds and wipes the slot. False when the slot was empty. */
-static bool take_wifi_credentials(hal_wifi_credentials_t *creds)
+/** Moves the waiting credentials into creds and empties the slot. */
+static void take_wifi_credentials(hal_wifi_credentials_t *creds)
 {
     portENTER_CRITICAL(&s_wifi_slot.lock);
-    bool full = s_wifi_slot.full;
-    if (full) {
-        memcpy(creds->ssid, s_wifi_slot.config.ssid, sizeof(creds->ssid));
-        memcpy(creds->password, s_wifi_slot.config.password, sizeof(creds->password));
-    }
-    wipe_wifi_slot_locked();
+    memcpy(creds->ssid, s_wifi_slot.config.ssid, sizeof(creds->ssid));
+    memcpy(creds->password, s_wifi_slot.config.password, sizeof(creds->password));
+    explicit_bzero(&s_wifi_slot.config, sizeof(s_wifi_slot.config));
+    s_wifi_slot.full = false;
     portEXIT_CRITICAL(&s_wifi_slot.lock);
-    return full;
 }
 
 static esp_err_t post_wifi_config(hal_ble_session_t session, const void *data, size_t data_len)
@@ -392,17 +384,9 @@ static void send_wifi_result(hal_ble_session_t session, bool success)
                                     success ? "WiFi connected successfully" : "WiFi connection failed");
 }
 
-static void handle_wifi_config(hal_ble_session_t session)
+static void handle_wifi_config(hal_ble_session_t session, const hal_wifi_credentials_t *creds)
 {
-    hal_wifi_credentials_t creds = {0};
-    if (!take_wifi_credentials(&creds)) {
-        ESP_LOGW(TAG, "WiFi config event without credentials");
-        return;
-    }
-
-    esp_err_t err = hal_wifi_connect(&creds);
-    explicit_bzero(&creds, sizeof(creds));
-
+    esp_err_t err = hal_wifi_connect(creds);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed to start: %s", esp_err_to_name(err));
         send_wifi_result(session, false);
@@ -412,7 +396,6 @@ static void handle_wifi_config(hal_ble_session_t session)
     transition_to(APP_STATE_CONNECTING_WIFI, APP_EVENT_WIFI_CONFIG_RECEIVED);
 }
 
-/* The tag task reported. A deep sleep that came in during the write runs now unless a scan runs. */
 static void finish_tag_write(const void *data)
 {
     hal_nfc_err_t nfc_err;
@@ -453,7 +436,7 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
             transition_to(APP_STATE_IDLE, event);
             break;
         case APP_EVENT_WIFI_CONFIG_RECEIVED:
-            handle_wifi_config(session);
+            handle_wifi_config(session, data);
             break;
         case APP_EVENT_WIFI_SCAN_REQUESTED:
             app_wifi_scan_start(session);
@@ -487,7 +470,7 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
         break;
 
     case APP_STATE_CONNECTING_WIFI:
-        if (event == APP_EVENT_WIFI_CONNECTED) {
+        if (event == APP_EVENT_WIFI_CONNECTED && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED) {
             send_wifi_result(s_wifi_session, true);
             transition_to(APP_STATE_IDLE, event);
         } else if (event == APP_EVENT_WIFI_DISCONNECTED) {
@@ -514,7 +497,19 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
     }
 }
 
-static void dispatch_event(const event_msg_t *msg)
+static const char *request_refusal(void)
+{
+    if (s_critical_battery_pending) {
+        return "low_battery";
+    }
+    /* A client can stay connected after onboarding ends, so answer instead of dropping. */
+    if (s_state != APP_STATE_ONBOARDING_BLE && s_state != APP_STATE_WRITING_TAG) {
+        return "not_onboarding";
+    }
+    return NULL;
+}
+
+static void dispatch_event(const event_msg_t *msg, const void *data, size_t data_len)
 {
     ESP_LOGD(TAG, "Event %s in state %s", s_event_names[msg->event], s_state_names[s_state]);
 
@@ -548,14 +543,14 @@ static void dispatch_event(const event_msg_t *msg)
         break;
     case APP_EVENT_WIFI_CONFIG_RECEIVED:
     case APP_EVENT_URL_SET:
-    case APP_EVENT_WIFI_SCAN_REQUESTED:
-        /* A client can stay connected after onboarding ends, so answer instead of dropping. */
-        if (s_state != APP_STATE_ONBOARDING_BLE && s_state != APP_STATE_WRITING_TAG) {
-            ESP_LOGW(TAG, "%s rejected in state %s", s_event_names[msg->event], s_state_names[s_state]);
+    case APP_EVENT_WIFI_SCAN_REQUESTED: {
+        const char *refusal = request_refusal();
+        if (refusal != NULL) {
+            ESP_LOGW(TAG, "%s rejected in state %s: %s", s_event_names[msg->event], s_state_names[s_state], refusal);
             if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
                 send_wifi_result(msg->session, false);
             } else if (msg->event == APP_EVENT_URL_SET) {
-                app_url_set_reject(msg->session, "not_onboarding");
+                app_url_set_reject(msg->session, refusal);
             } else {
                 /* An empty result still carries the done terminator the client waits for. */
                 hal_ble_send_wifi_scan_results(msg->session, NULL, 0);
@@ -563,18 +558,23 @@ static void dispatch_event(const event_msg_t *msg)
             return;
         }
         break;
+    }
     default:
         break;
     }
 
-    handle_state_event(msg->event, msg->session, msg->data, msg->data_len);
+    handle_state_event(msg->event, msg->session, data, data_len);
 }
 
 static void handle_event(const event_msg_t *msg)
 {
-    dispatch_event(msg);
     if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
-        wipe_wifi_slot();
+        hal_wifi_credentials_t creds = {0};
+        take_wifi_credentials(&creds);
+        dispatch_event(msg, &creds, sizeof(creds));
+        explicit_bzero(&creds, sizeof(creds));
+    } else {
+        dispatch_event(msg, msg->data, msg->data_len);
     }
     if (s_critical_battery_pending) {
         power_down_when_idle();

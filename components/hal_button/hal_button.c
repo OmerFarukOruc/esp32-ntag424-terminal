@@ -77,7 +77,6 @@ static void queue_event(hal_button_event_t event, uint32_t hold_ms)
     }
 }
 
-/** Queues a HOLD event for every whole second up to held_ms that has none yet, in order */
 static void queue_hold_steps(uint32_t held_ms)
 {
     int step = held_ms / HOLD_STEP_MS;

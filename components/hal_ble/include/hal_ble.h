@@ -41,7 +41,9 @@
  * (Write Request Rejected). The device cannot start the MTU exchange itself,
  * because the NimBLE GATT client needs the central role, which this firmware
  * turns off. A write the application cannot queue fails with ATT error 0x11
- * (Insufficient Resources), so an acknowledged write always gets its reply.
+ * (Insufficient Resources). An acknowledged write gets its reply, except a
+ * repeated WIFI_SCAN from the same session while its scan runs and a
+ * WIFI_CONFIG whose connect attempt a short press ends.
  *
  * Writes are limited to 200 bytes. A write that is empty or over that limit
  * fails with ATT error 0x0D (Invalid Attribute Value Length). So does a
@@ -94,7 +96,8 @@ extern "C" {
  *
  * Every request carries the session of the connection that sent it. A reply
  * sent with that session reaches only that connection, never a client that
- * connected later.
+ * connected later. The device checks the session right before each send, so
+ * only a reconnect within those few instructions could still receive it.
  */
 typedef uint32_t hal_ble_session_t;
 

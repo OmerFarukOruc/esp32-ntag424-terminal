@@ -196,6 +196,8 @@ Expect `hal_ble: BLE connected, conn_handle=<n>` and `MTU update: conn_handle=<n
 | Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not one JSON value (<n> bytes)` | [ ] |
 | Bytes after the JSON | `{"deviceId":"SHOP"} x` to URL_SET fails with ATT error `0x13` and the same log line | [ ] |
 | NUL character | `{"deviceId":"SHOP\u0000X"}` to URL_SET fails with ATT error `0x13`, log `Write holds a NUL character` | [ ] |
+| Bad escape | `{"deviceId":"AB\uZZZZCD"}` to URL_SET fails with ATT error `0x13`, log `Write holds a \u escape without 4 hex digits` | [ ] |
+| Control byte | `{"deviceId":"SHOP"}` followed by the byte `0x01` to URL_SET fails with ATT error `0x13`, log `Write holds a control character` | [ ] |
 | Missing field | `{"x":1}` to URL_SET fails with ATT error `0x13` and `URL_SET needs a string deviceId` | [ ] |
 | No notifications | With notifications off on a characteristic, the write fails with ATT error `0xFD`, and the log shows `Write refused: notifications are off on this characteristic` | [ ] |
 | Small MTU | With the default 23-byte MTU, a write fails with ATT error `0xFC`, and the log shows `Write refused: ATT MTU 23 is below 100` | [ ] |
@@ -221,7 +223,8 @@ hal_ble: Sent WiFi scan results: <N> networks, 0 skipped
 | Security text | Only `OPEN`, `WPA2`, and `WPA3` appear. A mixed WPA/WPA2 network shows `WPA2`, and a mixed WPA2/WPA3 network shows `WPA3`. | [ ] |
 | Unjoinable networks | A WEP or WPA-only access point does not appear in the scan | [ ] |
 | Repeated request | A second write while a scan runs logs `Scan request ignored: a scan is already running` | [ ] |
-| Small MTU | Without an MTU request (23 bytes) the scan write fails with ATT error `0xFC` and no scan runs. With an MTU of 100 or more, every entry arrives. | [ ] |
+| Request from a second client | Client A starts a scan and disconnects at once; client B connects, enables notifications and writes WIFI_SCAN before A's scan ends. B gets `{"done":true,"count":0,"skipped":0}` at once, and the log shows `Scan request refused: a scan for another connection is running` | [ ] |
+| Small MTU | Without an MTU request (23 bytes) the scan write fails with ATT error `0xFC` and no scan runs. With an MTU of 100 or more, every entry that fits in MTU minus 3 bytes arrives, and `count` plus `skipped` equals the networks found. | [ ] |
 | Connected | A scan while the device is connected keeps the link up, and no `Attempting WiFi reconnect...` line follows the scan | [ ] |
 | Saved network out of range | A scan with a saved network that is out of range can log `Scan blocked by a connect attempt, retry <n> of 7`. The list still arrives. After the scan the log shows `Attempting WiFi reconnect...`, and the device connects without a reboot when the access point returns. | [ ] |
 | No saved network | A scan with no saved credentials is not followed by a reconnect line | [ ] |
@@ -278,6 +281,7 @@ The offsets and the byte count are for the default base URL `https://example.com
 | PN532 RX wire touching a noisy line | Code 1005 `sdm_timeout` or 1003 `pn532_unresponsive` no later than about 30 s after the request. The device stays responsive and the next request works once the wire is fixed. | [ ] |
 | A tag that is not an NTAG424 DNA | Code 1002 `unsupported_tag` after one attempt (for example an NTAG215) | [ ] |
 | A DESFire tag without the NDEF application | Code 1007 `unsupported_tag_capability` after one attempt | [ ] |
+| An ISO 14443-4 tag with the NDEF application that is not an NTAG 424 DNA, such as a DESFire EV2 (not run on hardware yet) | Code 1007 `unsupported_tag_capability` after one attempt, log `SDM config: tag reports vendor 0x04, type 0x<tt>, hardware version 0x<vv>; it is not an NTAG 424 DNA`, and the tag content is unchanged | [ ] |
 | An NTAG424 DNA whose file 02 change right is not key 0 | Code 1007 `unsupported_tag_capability` after one attempt, log `SDM config: file 02 has type 0, <n> bytes and change key <k>`, and the tag content is unchanged | [ ] |
 | PN532 TX wire unplugged after boot | Code 1003 `pn532_unresponsive` after several seconds, with `SDM config: PN532 unavailable after recovery` | [ ] |
 | Wire plugged in again, same request | Success without a reboot, because the firmware re-initializes the PN532. Not confirmed on hardware. | [ ] |
@@ -450,6 +454,7 @@ The monitor samples every 30 s. Raise or lower the supply to test the levels.
 | Critical (below 3100 mV) | Two readings in a row, 30 s apart, give `hal_power: Battery level changed: <old> -> 0`, `Critical battery, entering deep sleep`, and `hal_power: Entering deep sleep`. BLE, WiFi, and SNTP stop first. Only a reset or a power cycle wakes the device. | [ ] |
 | Critical during a tag write | `Deep sleep postponed: a tag write is running`. The device sleeps after the write result. | [ ] |
 | Critical during a WiFi scan | `Deep sleep postponed: a scan is running`. The device sleeps after the scan terminator. | [ ] |
+| New request while the sleep waits | During a postponed sleep, a WIFI_SCAN gets the empty terminator, a URL_SET gets code 1099 `low_battery`, and a WIFI_CONFIG gets the failure notification, each with the log `<event> rejected in state <state>: low_battery` | [ ] |
 
 The level numbers in the log are 0 critical, 1 low, 2 medium, and 3 normal.
 

@@ -83,9 +83,11 @@ esp_err_t hal_nfc_init(void)
     g_nfc.mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(g_nfc.mutex != NULL, ESP_ERR_NO_MEM, TAG, "Failed to create mutex");
 
+    xSemaphoreTake(g_nfc.mutex, portMAX_DELAY);
     deadline_begin(deadline_after_ms(INIT_IO_LIMIT_MS));
     g_nfc.pn532 = nfc_reader_open();
     deadline_end();
+    xSemaphoreGive(g_nfc.mutex);
     if (g_nfc.pn532 == NULL) {
         ESP_LOGE(TAG, "Failed to initialize PN532");
         vSemaphoreDelete(g_nfc.mutex);

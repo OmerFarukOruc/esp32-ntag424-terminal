@@ -142,7 +142,7 @@ The three write characteristics, and switching on their notifications, need an e
 - Writes use the acknowledged ATT write, so the client sees errors.
 - Enable notifications (the CCCD, the descriptor that switches notifications on) on a characteristic before you write to it. Without that, the write fails with ATT error `0xFD`, because the device could not send its reply.
 - Request an ATT MTU (the largest packet the link carries) of at least 100 bytes. A notification must fit in MTU minus 3 bytes. The device cannot start the MTU exchange itself. With a smaller MTU, a write fails with ATT error `0xFC`.
-- An acknowledged write always gets its reply notification while the client stays connected. When the device cannot queue the request, the write fails with ATT error `0x11` and the client can repeat it.
+- An acknowledged write gets its reply notification while the client stays connected, with two exceptions: a second WIFI_SCAN from the same connection while its scan runs (the running scan's terminator answers both), and a WIFI_CONFIG whose connect attempt a short press ends. When the device cannot queue the request, the write fails with ATT error `0x11` and the client can repeat it.
 - A WIFI_CONFIG or URL_SET write may be at most 200 bytes.
 - When pairing fails, the device ends the connection. When a phone pairs again after it lost its bond, the device drops its old bond and accepts the new pairing.
 
@@ -168,7 +168,7 @@ The device returns `0x0D` in these cases.
 The device returns `0x13` in these cases.
 
 - The write is not one JSON value with only whitespace after it.
-- The write holds a NUL character, raw or as the escape `\u0000`.
+- The write holds a NUL character, raw or as the escape `\u0000`, a control byte below `0x20` other than tab, line feed and carriage return, or a `\u` escape without 4 hex digits.
 - WIFI_CONFIG has no `ssid`, or an `ssid` or a `password` that is not a string.
 - URL_SET has no `deviceId`, or one that is not a string.
 
@@ -200,7 +200,7 @@ A final notification ends the scan:
 
 `count` is the number of network notifications sent. `skipped` is the number of networks not sent, because their JSON did not fit in MTU minus 3 bytes or a send failed, so `count` plus `skipped` is the number of networks found. A failed or empty scan sends only the terminator with `count` 0. The client treats the scan as complete when it sees `done`.
 
-The device runs a scan only during onboarding. Outside onboarding it answers with the empty terminator at once, and it ignores a request while a scan runs.
+The device runs a scan only during onboarding. Outside onboarding, and after a critical battery warning, it answers with the empty terminator at once. While a scan runs, it ignores a second request from the same connection and answers a request from another connection with the empty terminator.
 
 ### WIFI_CONFIG
 
@@ -227,7 +227,7 @@ Write the device id:
 {"deviceId":"SHOP_01"}
 ```
 
-The id is 1 to 31 characters from `A-Z a-z 0-9 _ -`. The device checks the id first, and a bad character returns code 1006 in the result notification, not an ATT error. It then waits up to 15 s for a tag on the PN532. Each of up to 4 retries waits up to 5 s, and the write gives up 30 s after it starts, counting PN532 recovery. No tag command starts after that, so a write that runs out of time after writing the URL leaves the URL on the tag with SDM off. A wrong key 0, a tag that is not an NTAG424 DNA, and a tag without the NDEF application end the write after the first attempt. Put the tag on the antenna before or right after the write. When the write succeeds, the device stores the id in NVS, and DEVICE_INFO reports it from then on.
+The id is 1 to 31 characters from `A-Z a-z 0-9 _ -`. The device checks the id first, and a bad character returns code 1006 in the result notification, not an ATT error. It then waits up to 15 s for a tag on the PN532. Each of up to 4 retries waits up to 5 s, and the write gives up 30 s after it starts, counting PN532 recovery. No tag command starts after that, so a write that runs out of time after writing the URL leaves the URL on the tag, and whether SDM is on is not confirmed. A wrong key 0, a tag that is not an NTAG424 DNA, and a tag without the NDEF application end the write after the first attempt. Put the tag on the antenna before or right after the write. When the write succeeds, the device stores the id in NVS, and DEVICE_INFO reports it from then on.
 
 The result arrives as one notification:
 
@@ -244,10 +244,10 @@ The result arrives as one notification:
 | 1004 | `tag_auth_failed` | The tag rejected key 0 |
 | 1005 | `sdm_timeout` | The 30 s limit passed, or a PN532 exchange timed out on the last attempt. A tag that is missing the whole time usually ends here, because the first 15 s window and the 5 s retry windows add up to more than 30 s. |
 | 1006 | `invalid_device_id` | The id has a bad length or character |
-| 1007 | `unsupported_tag_capability` | The tag lacks a required capability, for example the NDEF application, or its file 02 is not a standard data file that key 0 may reconfigure and that holds the URL. The device checks this before it writes anything. |
+| 1007 | `unsupported_tag_capability` | The tag lacks a required capability: it has no NDEF application, it is not an NTAG 424 DNA by its GetVersion answer, or its file 02 is not a standard data file that key 0 may reconfigure and that holds the URL. The device checks this before it writes anything. |
 | 1099 | `sdm_config_failed` | Any other failure, such as a framing error or an unexpected status from the tag |
 
-Code 1099 also comes with `tag_configured_id_not_saved` (the tag holds the new URL, but saving the id in NVS failed, so DEVICE_INFO keeps the old id), `tag_configured_id_not_published` (the tag holds the new URL and NVS the new id, but DEVICE_INFO shows it only after a reboot), `nfc_config_busy` (a tag write is already running), `not_onboarding` (the device left onboarding while the client stayed connected) and `nfc_config_task_create_failed` (out of memory). A WIFI_CONFIG sent during a tag write or outside onboarding gets a WIFI_CONFIG failure notification. The device sends no result when the client disconnects before the write ends, or when the client turned notifications off on URL_SET during the write. A result goes only to the connection that sent the request, never to a client that connected later.
+Code 1099 also comes with `tag_configured_id_not_saved` (the tag holds the new URL, but saving the id in NVS failed, so DEVICE_INFO keeps the old id), `tag_configured_id_not_published` (the tag holds the new URL and NVS the new id, but DEVICE_INFO shows it only after a reboot), `nfc_config_busy` (a tag write is already running), `not_onboarding` (the device left onboarding while the client stayed connected), `low_battery` (a critical battery warning came in and the device sleeps once the running work ends) and `nfc_config_task_create_failed` (out of memory). A WIFI_CONFIG sent during a tag write, outside onboarding or after a critical battery warning gets a WIFI_CONFIG failure notification. The device sends no result when the client disconnects before the write ends, or when the client turned notifications off on URL_SET during the write. A result goes only to the connection that sent the request, never to a client that connected later.
 
 ## SDM URL and backend verification
 
@@ -272,7 +272,7 @@ A backend verifies a request in these steps.
 4. Keep bytes 1, 3, 5 up to 15 of the 16 byte result. This 8 byte value must equal `cmac`.
 5. Accept the request only when the counter is greater than the last counter seen for that UID. The counter rises with every NDEF read, not with every tap. A phone that polls the tag reads many times, so do not require `last + 1`. The counter has 24 bits. Compare and store the counter in one atomic step per UID, so two requests with the same counter cannot both pass. Also check that the UID belongs to the `<device_id>` in the path, because the tag MACs only its UID and counter, not the URL.
 
-This Python function implements the steps. It needs the `cryptography` package, and the all-zero key stands for the factory key. It returns the UID and counter of a valid request, and `None` for any other input, including hex of the wrong length:
+This Python function implements steps 1 to 4 and the counter comparison of step 5. It needs the `cryptography` package, and the all-zero key stands for the factory key. It returns the UID and counter of a valid request, and `None` for any other input, including hex of the wrong length. The caller still does two parts of step 5: it stores the returned counter for that UID in the same atomic step as the read of `last_counter`, and it checks that the UID belongs to the `<device_id>` in the path.
 
 ```python
 import hmac

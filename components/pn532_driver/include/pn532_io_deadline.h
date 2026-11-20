@@ -11,9 +11,11 @@
  * The library waits for a frame preamble one byte at a time and restarts its
  * timeout on each byte, so a stream of other bytes keeps it reading forever.
  * The component links uart_read_bytes() through a wrapper: while a deadline
- * is set for a port, each read on that port waits at most until the deadline,
- * and a read at or after the deadline returns 0 bytes, which the library
- * treats as a timeout. Reads on other ports are unchanged.
+ * is set for a port, a read on that port reads one byte at a time, waits
+ * up to its ticks_to_wait for each byte as uart_read_bytes() does for each
+ * fragment, and ends at the deadline. A read at or after the deadline
+ * returns 0 bytes, which the library treats as a timeout. Reads on other
+ * ports are unchanged.
  */
 
 #ifndef PN532_IO_DEADLINE_H

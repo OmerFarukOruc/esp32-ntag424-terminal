@@ -54,9 +54,17 @@ static struct {
     /* The fields below change under s_lock. */
     hal_wifi_state_t state;
     hal_wifi_event_cb_t event_callback;
+    esp_event_handler_instance_t got_ip_timeout_handler;
     int retry_count;
+    int credential_failures;
     int backoff_ms;
 } s_network;
+
+ESP_EVENT_DEFINE_BASE(HAL_NETWORK_EVENT);
+#define HAL_NETWORK_EVENT_GOT_IP_TIMEOUT 0
+
+/* Chosen, not from a source: a full event queue empties within a second. */
+#define GOT_IP_TIMEOUT_REPOST_MS 1000
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -78,15 +86,20 @@ static void retry_reset(void)
 {
     portENTER_CRITICAL(&s_lock);
     s_network.retry_count = 0;
+    s_network.credential_failures = 0;
     s_network.backoff_ms = WIFI_BACKOFF_MIN_MS;
     portEXIT_CRITICAL(&s_lock);
 }
 
 /* Counts a failed attempt and returns the count, with the delay before the next attempt. */
-static int retry_next(int *delay_ms)
+static int retry_next(bool credential_failure, int *delay_ms, int *credential_failures)
 {
     portENTER_CRITICAL(&s_lock);
     int attempt = ++s_network.retry_count;
+    if (credential_failure) {
+        s_network.credential_failures++;
+    }
+    *credential_failures = s_network.credential_failures;
     *delay_ms = s_network.backoff_ms;
     int doubled_ms = s_network.backoff_ms * 2;
     s_network.backoff_ms = (doubled_ms > WIFI_BACKOFF_MAX_MS) ? WIFI_BACKOFF_MAX_MS : doubled_ms;
@@ -148,10 +161,10 @@ static void restart_timer(esp_timer_handle_t timer, uint32_t delay_ms, const cha
 static void retry_after_failure(uint8_t reason)
 {
     int delay_ms;
-    int attempt = retry_next(&delay_ms);
-    if (s_network.credentials_unproven && attempt >= WIFI_NEW_CREDENTIALS_MAX_ATTEMPTS &&
-            reason_is_credential_failure(reason)) {
-        ESP_LOGW(TAG, "New credentials failed %d times (reason %d), giving up", attempt, reason);
+    int credential_failures;
+    int attempt = retry_next(reason_is_credential_failure(reason), &delay_ms, &credential_failures);
+    if (s_network.credentials_unproven && credential_failures >= WIFI_NEW_CREDENTIALS_MAX_ATTEMPTS) {
+        ESP_LOGW(TAG, "New credentials failed %d times (reason %d), giving up", credential_failures, reason);
         s_network.auto_reconnect = false;
         set_state(HAL_WIFI_STATE_DISCONNECTED);
         return;
@@ -188,10 +201,10 @@ static void reconnect_timer_callback(void *arg)
     start_connect();
 }
 
-/* The disconnect event that follows counts the attempt as failed. */
-static void got_ip_timer_callback(void *arg)
+/* Runs on the event loop task, after any got-IP event queued before it. The disconnect event that
+ * follows counts the attempt as failed. */
+static void got_ip_timeout_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
-    (void)arg;
     if (hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED) {
         return;
     }
@@ -199,6 +212,17 @@ static void got_ip_timer_callback(void *arg)
     esp_err_t err = esp_wifi_disconnect();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Disconnect failed: %s", esp_err_to_name(err));
+        retry_after_failure(WIFI_REASON_UNSPECIFIED);
+    }
+}
+
+static void got_ip_timer_callback(void *arg)
+{
+    (void)arg;
+    esp_err_t err = esp_event_post(HAL_NETWORK_EVENT, HAL_NETWORK_EVENT_GOT_IP_TIMEOUT, NULL, 0, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "IP address timeout not queued: %s", esp_err_to_name(err));
+        restart_timer(s_network.got_ip_timer, GOT_IP_TIMEOUT_REPOST_MS, "IP address");
     }
 }
 
@@ -267,6 +291,10 @@ static void network_teardown(void)
     if (s_network.ip_handler) {
         esp_event_handler_instance_unregister(IP_EVENT, ESP_EVENT_ANY_ID, s_network.ip_handler);
     }
+    if (s_network.got_ip_timeout_handler) {
+        esp_event_handler_instance_unregister(HAL_NETWORK_EVENT, HAL_NETWORK_EVENT_GOT_IP_TIMEOUT,
+                                              s_network.got_ip_timeout_handler);
+    }
     if (s_network.reconnect_timer) {
         esp_timer_stop(s_network.reconnect_timer);
         esp_timer_delete(s_network.reconnect_timer);
@@ -327,6 +355,10 @@ esp_err_t hal_network_init(void)
     ESP_GOTO_ON_ERROR(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, ip_event_handler,
                                                           NULL, &s_network.ip_handler),
                       fail, TAG, "IP event handler register failed");
+    ESP_GOTO_ON_ERROR(esp_event_handler_instance_register(HAL_NETWORK_EVENT, HAL_NETWORK_EVENT_GOT_IP_TIMEOUT,
+                                                          got_ip_timeout_handler, NULL,
+                                                          &s_network.got_ip_timeout_handler),
+                      fail, TAG, "IP address timeout handler register failed");
 
     s_network.initialized = true;
 

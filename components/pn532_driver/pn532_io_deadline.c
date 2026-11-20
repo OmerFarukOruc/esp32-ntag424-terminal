@@ -27,20 +27,35 @@ void pn532_io_deadline_clear(void)
 
 int __real_uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length, TickType_t ticks_to_wait);
 
+static TickType_t ticks_until(int64_t end_us)
+{
+    int64_t left_us = end_us - esp_timer_get_time();
+    if (left_us <= 0) {
+        return 0;
+    }
+    TickType_t ticks = pdMS_TO_TICKS((left_us + 999) / 1000);
+    return ticks > 0 ? ticks : 1;
+}
+
 int __wrap_uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length, TickType_t ticks_to_wait)
 {
-    if ((int)uart_num == atomic_load(&s_port)) {
-        int64_t left_us = atomic_load(&s_deadline_us) - esp_timer_get_time();
-        if (left_us <= 0) {
-            return 0;
-        }
-        TickType_t left_ticks = pdMS_TO_TICKS((left_us + 999) / 1000);
-        if (left_ticks == 0) {
-            left_ticks = 1;
-        }
-        if (ticks_to_wait > left_ticks) {
-            ticks_to_wait = left_ticks;
-        }
+    if ((int)uart_num != atomic_load(&s_port)) {
+        return __real_uart_read_bytes(uart_num, buf, length, ticks_to_wait);
     }
-    return __real_uart_read_bytes(uart_num, buf, length, ticks_to_wait);
+
+    int64_t deadline_us = atomic_load(&s_deadline_us);
+    uint8_t *out = buf;
+    uint32_t got = 0;
+    while (got < length) {
+        TickType_t wait = ticks_until(deadline_us);
+        if (wait == 0) {
+            break;
+        }
+        int n = __real_uart_read_bytes(uart_num, out + got, 1, wait < ticks_to_wait ? wait : ticks_to_wait);
+        if (n <= 0) {
+            return got > 0 ? (int)got : n;
+        }
+        got++;
+    }
+    return (int)got;
 }
