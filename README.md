@@ -182,7 +182,7 @@ Read returns:
 {"name":"TERMINAL-84F2","deviceId":"84F2","version":"<firmware version>"}
 ```
 
-`name` is the advertised name. `deviceId` is the device id without a prefix. Until URL_SET stores an id, the device id is the last two Bluetooth MAC bytes in uppercase hex. `version` is the firmware version, which comes from `git describe`.
+`name` is the advertised name. `deviceId` is the device id without a prefix. Until URL_SET stores an id, the device id is the last two Bluetooth MAC bytes in uppercase hex. `version` is the version built into the firmware. The CI section below says how each build sets it.
 
 ### WIFI_SCAN
 
@@ -358,15 +358,18 @@ pre-commit run --all-files
 
 Commit messages follow Conventional Commits, for example `fix(hal_ble): reject an empty ssid`. The subject needs at least 10 characters.
 
-CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and on tags that start with `v`. It has five jobs.
+CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and on tags that start with `v`. It has six jobs.
 
 - `pre-commit` runs the pre-commit stage hooks except `gitleaks`.
 - `gitleaks` scans the full git history.
-- `build` runs in the `espressif/idf:v6.1` container once per configuration: `default` builds `sdkconfig.defaults`, and each other leg adds one `sdkconfig.ci.*` file on top. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build. Each leg fails when the build changes `dependencies.lock`, and restores its ccache folder from the GitHub Actions cache. Only runs on `main` save that folder, so pull requests and tags reuse the compiler output of the newest `main` run. The `default` leg uploads the firmware files.
+- `build` runs in the `espressif/idf:v6.1` container once per configuration: `default` builds `sdkconfig.defaults`, and each other leg adds one `sdkconfig.ci.*` file on top. Those files flip the button, buzzer, and battery options, so the code behind each `#if CONFIG_HAL_*` compiles in at least one build. Each leg fails when the build changes `dependencies.lock`, and restores its ccache folder from the GitHub Actions cache. Only runs on `main` save that folder, so pull requests and tags reuse the compiler output of the newest `main` run. The `default` leg uploads the firmware files and a release candidate (below).
+- `release-rebuild` builds the release candidate again from its source archive, in the same pinned image with Docker networking turned off, and fails when its version or its loaded firmware bytes differ from the release (below).
 - `host-tests` runs `test/host/run.sh` and `test/host/test_readme_verifier.py` in the same container.
-- `publish` runs only for a `v*` tag, and only after the other four jobs pass.
+- `publish` runs only for a `v*` tag, and only after the other five jobs pass.
 
-For a `v*` tag, the `default` leg of `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule, the managed cJSON component, the resolved `sdkconfig` and a `version.txt` with the tag. The archive therefore rebuilds without network access and gives the firmware the tag as its version. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
+On every run, the `default` leg of `build` packages a release candidate with `scripts/package_release.py <label> build dist`. For a `v*` tag the label is the tag, the firmware is built with the tag as its version (`-D PROJECT_VER=<tag>`), and packaging fails when the built version differs. Other runs use the label `review-<short commit>` and the version `git describe` gives. ESP-IDF keeps the first 31 characters of a version, and `version.txt` holds the same 31. The candidate holds a merged binary named `esp32-ntag424-terminal-<label>.bin`, the ELF, and a source archive with every file committed in the repository and the checked-out submodule, read from Git, the managed cJSON component, the resolved `sdkconfig` and a `version.txt` with the built version. A nested submodule that is not checked out, such as the PN532 library's `PCB/PCBCase`, is left out and named in the log. The archive lists its files in a fixed order with the commit time, so packaging one commit twice with the same label, version, `sdkconfig` and managed components gives the same bytes.
+
+`release-rebuild` runs `scripts/check_release.py dist <work dir>` in the pinned `espressif/idf:v6.1` image with `--network none`. It checks that the merged binary carries the SHA-256 of the released ELF, extracts the archive outside any Git checkout, and builds it with `idf.py build`. It fails unless the released ELF, `version.txt` and the rebuilt ELF report the same version, every section the rebuilt ELF loads into the chip holds the same bytes as in the released ELF, and the build left the archived `sdkconfig` settings, `dependencies.lock` and the managed components unchanged. The application descriptor section, which holds the build time, and the debug sections are not compared, so the ELF and binary files can still differ. The archive holds no ESP-IDF; rebuilding it needs ESP-IDF v6.1, for example that image. `publish` releases the candidate the tag run checked, adds `SHA256SUMS`, and creates the GitHub release with generated notes. A tag must be 1 to 31 characters from `[A-Za-z0-9._+-]`, because the firmware stores its version in 32 bytes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
 
 `test/host/run.sh` builds the state machine, the BLE, network, NFC, power and button HALs, the PN532 driver wrapper and the vendored PN532 driver for the host with AddressSanitizer and UBSan, against stand-ins for ESP-IDF, FreeRTOS and NimBLE, and runs one suite per area. It needs gcc, cmake, the OpenSSL `libcrypto` headers, and the `managed_components/` folder that `idf.py build` or `idf.py reconfigure` creates. A passing run says nothing about the PN532, the tag, or the radio, because the stand-ins answer as the code expects.
 
