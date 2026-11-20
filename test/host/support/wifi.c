@@ -24,6 +24,8 @@ int host_event_post_fails;
 
 static wifi_config_t saved_config;
 static bool started;
+esp_err_t wifi_stop_result;
+esp_err_t wifi_deinit_result;
 
 static struct handler {
     bool used;
@@ -46,6 +48,8 @@ void host_wifi_reset(void)
     wifi_disconnect_calls = 0;
     wifi_connect_result = ESP_OK;
     wifi_disconnect_result = ESP_OK;
+    wifi_stop_result = ESP_OK;
+    wifi_deinit_result = ESP_OK;
     host_event_post_fails = 0;
     memset(&saved_config, 0, sizeof saved_config);
     started = false;
@@ -133,7 +137,7 @@ esp_err_t esp_wifi_init(const wifi_init_config_t *c)
 
 esp_err_t esp_wifi_deinit(void)
 {
-    return ESP_OK;
+    return wifi_deinit_result;
 }
 
 esp_err_t esp_wifi_set_mode(wifi_mode_t m)
@@ -152,6 +156,9 @@ esp_err_t esp_wifi_start(void)
 
 esp_err_t esp_wifi_stop(void)
 {
+    if (wifi_stop_result != ESP_OK) {
+        return wifi_stop_result;
+    }
     if (started) {
         started = false;
         esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_STOP, NULL, 0, 0);

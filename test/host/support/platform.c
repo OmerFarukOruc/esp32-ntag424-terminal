@@ -16,6 +16,9 @@
 #define MAX_TASKS 16
 
 int64_t host_now_us;
+bool host_in_host;
+bool host_blocked_in_host;
+void (*host_on_block)(void);
 
 int64_t esp_timer_get_time(void)
 {
@@ -24,13 +27,16 @@ int64_t esp_timer_get_time(void)
 
 void vTaskDelay(TickType_t ticks)
 {
+    host_blocked_in_host |= host_in_host && ticks > 0;
     host_now_us += (int64_t)ticks * portTICK_PERIOD_MS * 1000;
 }
 
 const char *esp_err_to_name(esp_err_t e)
 {
-    static char name[16];
-    snprintf(name, sizeof name, "err%d", e);
+    static char names[16][16];
+    static unsigned next;
+    char *name = names[next++ % 16];
+    snprintf(name, sizeof names[0], "err%d", e);
     return name;
 }
 
@@ -39,23 +45,63 @@ void esp_fill_random(void *buf, size_t len)
     memset(buf, 0x11, len);
 }
 
+struct host_sem {
+    bool binary;
+    int count;
+};
+
+static struct host_sem *sem_init(struct host_sem *s, bool binary)
+{
+    s->binary = binary;
+    s->count = 0;
+    return s;
+}
+
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
 {
-    return malloc(1);
+    return sem_init(malloc(sizeof(struct host_sem)), false);
 }
 
 SemaphoreHandle_t xSemaphoreCreateBinary(void)
 {
-    return malloc(1);
+    return sem_init(malloc(sizeof(struct host_sem)), true);
 }
 
-BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t wait)
+SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t *buf)
 {
-    return pdTRUE;
+    _Static_assert(sizeof(StaticSemaphore_t) >= sizeof(struct host_sem), "StaticSemaphore_t too small");
+    return sem_init((struct host_sem *)buf, true);
 }
 
-BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
+BaseType_t xSemaphoreTake(SemaphoreHandle_t h, TickType_t wait)
 {
+    struct host_sem *s = h;
+    if (!s->binary) {
+        return pdTRUE;
+    }
+    if (s->count == 0 && wait > 0) {
+        host_blocked_in_host |= host_in_host;
+        if (host_on_block != NULL) {
+            host_on_block();
+        }
+    }
+    if (s->count > 0) {
+        s->count--;
+        return pdTRUE;
+    }
+    vTaskDelay(wait);
+    return pdFALSE;
+}
+
+BaseType_t xSemaphoreGive(SemaphoreHandle_t h)
+{
+    struct host_sem *s = h;
+    if (s->binary) {
+        if (s->count == 1) {
+            return pdFALSE;
+        }
+        s->count = 1;
+    }
     return pdTRUE;
 }
 

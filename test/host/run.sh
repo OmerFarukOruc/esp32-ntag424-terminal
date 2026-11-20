@@ -30,8 +30,9 @@ build() {
     ble)
         [[ -f $cjson/cJSON.c ]] || { echo "missing $cjson; run idf.py reconfigure first" >&2; return 1; }
         gcc "${cflags[@]}" -I "$repo/components/hal_ble/include" -I "$repo/components/hal_ble" -I "$cjson" \
-            -DHAL_BLE_SRC="\"$repo/components/hal_ble/hal_ble.c\"" "$host/test_ble.c" "$host/support/nimble.c" \
-            "$host/support/platform.c" "$cjson/cJSON.c" -lm -Wl,--wrap=free "$@"
+            -DHAL_BLE_SRC="\"$repo/components/hal_ble/hal_ble.c\"" "$host/test_ble.c" \
+            "$repo/components/hal_ble/hal_ble_notify.c" "$host/support/nimble.c" "$host/support/platform.c" \
+            "$cjson/cJSON.c" -lm -Wl,--wrap=free "$@"
         ;;
     network)
         gcc "${cflags[@]}" -I "$repo/components/hal_network/include" \

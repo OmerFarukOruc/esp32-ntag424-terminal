@@ -203,12 +203,12 @@ esp_err_t hal_ble_deinit(void)
 {
     trace.ble_deinit_with_tasks = host_tasks_alive();
     trace.ble_deinit++;
-    return ESP_OK;
+    return trace.ble_deinit_err;
 }
 
 bool hal_ble_session_is_current(hal_ble_session_t s)
 {
-    return s != HAL_BLE_SESSION_NONE;
+    return s != HAL_BLE_SESSION_NONE && s == trace.ble_current;
 }
 
 esp_err_t hal_ble_send_wifi_scan_results(hal_ble_session_t s, const hal_ble_wifi_scan_result_t *r, size_t n)
@@ -289,7 +289,7 @@ esp_err_t hal_network_deinit(void)
 {
     trace.net_deinit_with_tasks = host_tasks_alive();
     trace.net_deinit++;
-    return ESP_OK;
+    return trace.net_deinit_err;
 }
 
 esp_err_t hal_wifi_connect(const hal_wifi_credentials_t *c)
@@ -315,6 +315,7 @@ void hal_wifi_register_callback(hal_wifi_event_cb_t cb)
 
 esp_err_t hal_wifi_scan(hal_wifi_ap_t aps[HAL_WIFI_SCAN_MAX], uint16_t *count)
 {
+    trace.scans++;
     trace.wifi_used_after_deinit |= trace.net_deinit > 0;
     aps[0] = host_scan_ap;
     *count = 1;
@@ -333,6 +334,7 @@ bool hal_nfc_device_id_valid(const char *id, size_t len)
 
 hal_nfc_err_t hal_nfc_ntag424_configure_sdm(const char *id, uint32_t t)
 {
+    trace.nfc_writes++;
     return trace.nfc_result;
 }
 

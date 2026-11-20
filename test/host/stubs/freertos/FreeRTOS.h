@@ -28,4 +28,7 @@ typedef struct {
 typedef void *TaskHandle_t;
 typedef void *QueueHandle_t;
 typedef void *SemaphoreHandle_t;
+typedef struct {
+    long opaque[4];
+} StaticSemaphore_t;
 typedef void (*TaskFunction_t)(void *);

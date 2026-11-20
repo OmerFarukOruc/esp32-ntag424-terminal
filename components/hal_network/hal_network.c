@@ -283,29 +283,36 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static void network_teardown(void)
+static esp_err_t network_teardown(void)
 {
+    s_network.initialized = false;
     if (s_network.wifi_handler) {
         esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_network.wifi_handler);
+        s_network.wifi_handler = NULL;
     }
     if (s_network.ip_handler) {
         esp_event_handler_instance_unregister(IP_EVENT, ESP_EVENT_ANY_ID, s_network.ip_handler);
+        s_network.ip_handler = NULL;
     }
     if (s_network.got_ip_timeout_handler) {
         esp_event_handler_instance_unregister(HAL_NETWORK_EVENT, HAL_NETWORK_EVENT_GOT_IP_TIMEOUT,
                                               s_network.got_ip_timeout_handler);
+        s_network.got_ip_timeout_handler = NULL;
     }
     if (s_network.reconnect_timer) {
         esp_timer_stop(s_network.reconnect_timer);
         esp_timer_delete(s_network.reconnect_timer);
+        s_network.reconnect_timer = NULL;
     }
     if (s_network.got_ip_timer) {
         esp_timer_stop(s_network.got_ip_timer);
         esp_timer_delete(s_network.got_ip_timer);
+        s_network.got_ip_timer = NULL;
     }
     if (s_network.wifi_initialized) {
-        esp_wifi_stop();
-        esp_wifi_deinit();
+        ESP_RETURN_ON_ERROR(esp_wifi_stop(), TAG, "WiFi stop failed");
+        ESP_RETURN_ON_ERROR(esp_wifi_deinit(), TAG, "WiFi deinit failed");
+        s_network.wifi_initialized = false;
     }
     if (s_network.sta_netif) {
         esp_netif_destroy_default_wifi(s_network.sta_netif);
@@ -314,6 +321,7 @@ static void network_teardown(void)
     hal_wifi_event_cb_t callback = s_network.event_callback;
     memset(&s_network, 0, sizeof(s_network));
     s_network.event_callback = callback;
+    return ESP_OK;
 }
 
 esp_err_t hal_network_init(void)
@@ -321,6 +329,8 @@ esp_err_t hal_network_init(void)
     if (s_network.initialized) {
         return ESP_OK;
     }
+    ESP_RETURN_ON_FALSE(!s_network.wifi_initialized, ESP_ERR_INVALID_STATE, TAG,
+                        "a failed deinit waits for its retry");
 
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init failed");
 
@@ -393,11 +403,11 @@ fail:
 
 esp_err_t hal_network_deinit(void)
 {
-    if (!s_network.initialized) {
+    if (!s_network.initialized && !s_network.wifi_initialized) {
         return ESP_OK;
     }
 
-    network_teardown();
+    ESP_RETURN_ON_ERROR(network_teardown(), TAG, "Deinit failed");
     ESP_LOGI(TAG, "Deinitialized");
     return ESP_OK;
 }

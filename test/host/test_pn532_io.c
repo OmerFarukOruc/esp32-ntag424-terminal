@@ -44,6 +44,7 @@ int main(void)
     pn532_t *p = calloc(1, sizeof * p);
     p->uart = CONFIG_HAL_NFC_UART_NUM;
     p->mutex = xSemaphoreCreateBinary();
+    xSemaphoreGive(p->mutex);
     g_nfc.pn532 = p;
     g_nfc.mutex = xSemaphoreCreateMutex();
     t0 = host_now_us;

@@ -55,6 +55,7 @@ struct ble_gatt_svc_def {
 #define BLE_ATT_ERR_INSUFFICIENT_RES 0x11
 #define BLE_ATT_ERR_VALUE_NOT_ALLOWED 0x13
 #define BLE_HS_CONN_HANDLE_NONE 0xffff
+#define BLE_HS_EALREADY 2
 #define BLE_HS_EINVAL 3
 #define BLE_HS_ENOMEM 6
 #define BLE_HS_ENOTCONN 7
@@ -149,12 +150,31 @@ typedef void ble_npl_event_fn(struct ble_npl_event *ev);
 struct ble_npl_event {
     ble_npl_event_fn *fn;
     void *arg;
+    bool queued;
+    bool live;
 };
 struct ble_npl_eventq {
     int unused;
 };
 void ble_npl_event_init(struct ble_npl_event *ev, ble_npl_event_fn *fn, void *arg);
+static inline void *ble_npl_event_get_arg(struct ble_npl_event *ev)
+{
+    return ev->arg;
+}
 void ble_npl_eventq_put(struct ble_npl_eventq *q, struct ble_npl_event *ev);
+void ble_npl_event_deinit(struct ble_npl_event *ev);
+typedef uint32_t ble_npl_time_t;
+typedef int ble_npl_error_t;
+enum { BLE_NPL_OK = 0 };
+struct ble_npl_callout {
+    struct ble_npl_event ev;
+    bool armed;
+};
+int ble_npl_callout_init(struct ble_npl_callout *co, struct ble_npl_eventq *q, ble_npl_event_fn *fn, void *arg);
+ble_npl_error_t ble_npl_callout_reset(struct ble_npl_callout *co, ble_npl_time_t ticks);
+void ble_npl_callout_stop(struct ble_npl_callout *co);
+void ble_npl_callout_deinit(struct ble_npl_callout *co);
+ble_npl_time_t ble_npl_time_ms_to_ticks32(uint32_t ms);
 typedef void ble_hs_sync_fn(void);
 typedef void ble_hs_reset_fn(int reason);
 struct ble_hs_cfg_t {
