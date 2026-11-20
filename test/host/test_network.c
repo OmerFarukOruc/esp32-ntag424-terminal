@@ -4,144 +4,175 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include HAL_NET_SRC
-struct host_timer; extern struct host_timer *host_timer_named(const char *); extern void host_timer_fire(struct host_timer *);
-struct host_timer {
-    esp_timer_create_args_t args;
-    int armed;
-    uint64_t us;
-    int starts;
-};
-extern int wifi_connect_calls, wifi_disconnect_calls; extern esp_err_t wifi_connect_result;
 #include "check.h"
-static hal_wifi_state_t last_cb = -1;
-static void cb(hal_wifi_state_t s)
+#include "host.h"
+
+#define ATTEMPTS_BEFORE_DISCONNECTED 10
+#define NEW_CREDENTIAL_FAILURES_BEFORE_GIVING_UP 3
+
+static struct host_timer *reconnect_timer;
+static struct host_timer *got_ip_timer;
+
+static void start(void)
 {
-    last_cb = s;
+    hal_network_deinit();
+    host_wifi_reset();
+    hal_network_init();
+    reconnect_timer = host_timer_named("wifi_reconnect");
+    got_ip_timer = host_timer_named("wifi_got_ip");
 }
-static int armed_timers(void)
+
+static void deliver(esp_event_base_t base, int32_t id, const void *data, size_t size)
 {
-    int n = 0;
-    for (int i = 0; i < 8; i++) {
-        extern struct host_timer host_timers[];
-        extern int host_timer_count;
-        if (i < host_timer_count && host_timers[i].armed) {
-            n++;
-        }
-    } return n;
+    esp_event_post(base, id, data, size, 0);
+    host_event_loop_run();
 }
-static void creds(hal_wifi_credentials_t *c, const char *ssid, const char *pwd)
+
+static void disconnected(uint8_t reason)
 {
-    memset(c, 0, sizeof * c);
-    strcpy(c->ssid, ssid);
-    strcpy(c->password, pwd);
+    wifi_event_sta_disconnected_t ev = { .reason = reason };
+    deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &ev, sizeof ev);
 }
+
+static bool fire(struct host_timer *t)
+{
+    bool fired = host_timer_fire(t);
+    host_event_loop_run();
+    return fired;
+}
+
+static esp_err_t connect(const char *password)
+{
+    hal_wifi_credentials_t c = {0};
+    strcpy(c.ssid, "Home");
+    strcpy(c.password, password);
+    esp_err_t err = hal_wifi_connect(&c);
+    host_event_loop_run();
+    return err;
+}
+
+static const char *state_name(void)
+{
+    static const char *names[] = { "DISCONNECTED", "CONNECTING", "CONNECTED", "ERROR" };
+    return names[hal_wifi_get_state()];
+}
+
 int main(void)
 {
     char d[200];
-    hal_wifi_register_callback(cb);
-    hal_network_init();
-    hal_wifi_credentials_t c;
-    char psk[65]; memset(psk, 'z', 64); psk[64] = 0;
-    creds(&c, "Home", psk);
-    int disc_before = wifi_disconnect_calls;
-    esp_err_t e = hal_wifi_connect(&c);
-    snprintf(d, sizeof d, "connect=%s old-connection-stopped=%s", esp_err_to_name(e), wifi_disconnect_calls > disc_before ? "yes" : "no");
-    check("a 64-byte password that is not hex is refused before the old connection stops", e == ESP_ERR_INVALID_ARG && wifi_disconnect_calls == disc_before, d);
-    memset(psk, 'a', 64); creds(&c, "Home", psk);
-    e = hal_wifi_connect(&c);
+    char psk[65] = {0};
+
+    start();
+    memset(psk, 'z', 64);
+    esp_err_t e = connect(psk);
+    snprintf(d, sizeof d, "connect=%s disconnects=%d", esp_err_to_name(e), wifi_disconnect_calls);
+    check("a 64-byte password that is not hex is refused before the old connection stops",
+          e == ESP_ERR_INVALID_ARG && wifi_disconnect_calls == 0, d);
+
+    memset(psk, 'a', 64);
+    e = connect(psk);
     snprintf(d, sizeof d, "connect=%s", esp_err_to_name(e));
     check("a 64-digit hex password is accepted", e == ESP_OK, d);
 
-    creds(&c, "Home", "password1");
-    hal_wifi_connect(&c);
+    start();
     wifi_connect_result = ESP_ERR_WIFI_CONN;
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_START, NULL);
-    snprintf(d, sizeof d, "armed-timers=%d state=%d", armed_timers(), (int)hal_wifi_get_state());
-    check("a connect call that fails at STA_START schedules a retry", host_timer_named("wifi_reconnect")->armed, d);
-    wifi_connect_result = ESP_OK;
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_START, NULL);
-    struct host_timer *rt = host_timer_named("wifi_reconnect");
-    wifi_connect_result = ESP_ERR_WIFI_CONN;
-    host_timer_fire(rt);
-    snprintf(d, sizeof d, "reconnect-timer-armed=%d state=%d", rt->armed, (int)hal_wifi_get_state());
-    check("a connect call that fails from the retry timer schedules a retry", rt->armed, d);
-    wifi_connect_result = ESP_OK;
-    for (int i = 0; i < 8; i++) {
-        extern struct host_timer host_timers[];
-        host_timers[i].armed = 0;
-    }
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_START, NULL);
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL);
-    int disc = wifi_disconnect_calls, fired = 0;
-    for (int i = 0; i < 8; i++) {
-        extern struct host_timer host_timers[];
-        extern int host_timer_count;
-        if (i < host_timer_count && host_timers[i].armed) {
-            host_timer_fire(&host_timers[i]);
-            fired++;
-        }
-    }
-    snprintf(d, sizeof d, "timers-armed-after-association=%d disconnects-after-they-fire=%d state=%d", fired, wifi_disconnect_calls - disc, (int)hal_wifi_get_state());
-    check("an association without an IP address in time is disconnected", wifi_disconnect_calls > disc, d);
-    for (int i = 0; i < 8; i++) {
-        extern struct host_timer host_timers[];
-        host_timers[i].armed = 0;
-    }
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL);
+    connect("password1");
+    snprintf(d, sizeof d, "connect calls=%d reconnect armed=%d state=%s", wifi_connect_calls, reconnect_timer->armed,
+             state_name());
+    check("a connect call that fails at STA_START schedules a retry", wifi_connect_calls == 1 && reconnect_timer->armed, d);
+
+    bool fired = fire(reconnect_timer);
+    snprintf(d, sizeof d, "fired=%d connect calls=%d reconnect armed=%d", fired, wifi_connect_calls,
+             reconnect_timer->armed);
+    check("a connect call that fails from the retry timer schedules a retry",
+          fired && wifi_connect_calls == 2 && reconnect_timer->armed, d);
+
+    start();
+    connect("password1");
+    deliver(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL, 0);
+    int disc = wifi_disconnect_calls;
+    fired = fire(got_ip_timer);
+    snprintf(d, sizeof d, "IP timer fired=%d disconnects=%d", fired, wifi_disconnect_calls - disc);
+    check("an association without an IP address in time is disconnected", fired && wifi_disconnect_calls - disc == 1, d);
+
+    start();
+    connect("password1");
+    deliver(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL, 0);
     ip_event_got_ip_t ip = {0};
-    ip_event_handler(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, &ip);
-    snprintf(d, sizeof d, "armed-timers-after-GOT_IP=%d state=%d", armed_timers(), (int)hal_wifi_get_state());
-    check("an IP address in time keeps the link", armed_timers() == 0 && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED, d);
-    creds(&c, "Home", "password1");
-    hal_wifi_connect(&c);
+    deliver(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip, sizeof ip);
+    snprintf(d, sizeof d, "IP timer armed=%d reconnect armed=%d state=%s", got_ip_timer->armed, reconnect_timer->armed,
+             state_name());
+    check("an IP address in time keeps the link",
+          !got_ip_timer->armed && !reconnect_timer->armed && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED, d);
+
+    start();
     wifi_connect_result = ESP_ERR_WIFI_CONN;
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_START, NULL);
-    int fires = 0;
-    while (hal_wifi_get_state() != HAL_WIFI_STATE_DISCONNECTED && fires < 50 && rt->armed) {
-        host_timer_fire(rt);
-        fires++;
+    connect("password1");
+    int attempts = 1;
+    while (hal_wifi_get_state() != HAL_WIFI_STATE_DISCONNECTED && attempts < 50 && fire(reconnect_timer)) {
+        attempts++;
     }
-    snprintf(d, sizeof d, "connect always fails: state=%d after %d retries", (int)hal_wifi_get_state(), fires);
-    check("connect calls that always fail end in DISCONNECTED", hal_wifi_get_state() == HAL_WIFI_STATE_DISCONNECTED, d);
-    extern esp_err_t wifi_disconnect_result;
-    struct host_timer *gt = host_timer_named("wifi_got_ip");
-    wifi_connect_result = ESP_OK;
-    creds(&c, "Home", "password1");
-    hal_wifi_connect(&c);
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_START, NULL);
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL);
+    snprintf(d, sizeof d, "state=%s after %d failed attempts, reconnect armed=%d", state_name(), attempts,
+             reconnect_timer->armed);
+    check("connect calls that always fail report DISCONNECTED on the 10th attempt and keep retrying",
+          hal_wifi_get_state() == HAL_WIFI_STATE_DISCONNECTED && attempts == ATTEMPTS_BEFORE_DISCONNECTED &&
+          reconnect_timer->armed, d);
+
+    start();
+    connect("password1");
+    deliver(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL, 0);
     esp_event_post(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip, sizeof ip, 0);
     disc = wifi_disconnect_calls;
-    host_timer_fire(gt);
-    snprintf(d, sizeof d, "got-IP event queued when the timer fires: disconnects=%d state=%d", wifi_disconnect_calls - disc, (int)hal_wifi_get_state());
-    check("the IP timeout does not disconnect a station whose address event is queued", wifi_disconnect_calls == disc && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED, d);
-    for (int i = 0; i < 8; i++) {
-        extern struct host_timer host_timers[];
-        host_timers[i].armed = 0;
-    }
-    ip_event_handler(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);
-    wifi_disconnect_result = ESP_FAIL;
-    host_timer_fire(gt);
-    wifi_disconnect_result = ESP_OK;
-    snprintf(d, sizeof d, "address lost, disconnect failed: reconnect timer armed=%d, IP timer armed=%d", rt->armed, gt->armed);
-    check("a failed disconnect on IP timeout schedules the next attempt", rt->armed, d);
+    fire(got_ip_timer);
+    snprintf(d, sizeof d, "disconnects=%d state=%s", wifi_disconnect_calls - disc, state_name());
+    check("the IP timeout does not disconnect a station whose address event is queued",
+          wifi_disconnect_calls == disc && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTED, d);
 
-    creds(&c, "Home", "password1");
-    hal_wifi_connect(&c);
-    for (int i = 0; i < 8; i++) {
-        extern struct host_timer host_timers[];
-        host_timers[i].armed = 0;
-    }
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_START, NULL);
+    deliver(IP_EVENT, IP_EVENT_STA_LOST_IP, NULL, 0);
+    wifi_disconnect_result = ESP_FAIL;
+    fired = fire(got_ip_timer);
+    snprintf(d, sizeof d, "IP timer fired=%d, reconnect armed=%d", fired, reconnect_timer->armed);
+    check("a failed disconnect on IP timeout schedules the next attempt", fired && reconnect_timer->armed, d);
+
+    start();
+    connect("password1");
+    deliver(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL, 0);
+    host_event_post_fails = 1;
+    disc = wifi_disconnect_calls;
+    fire(got_ip_timer);
+    int disc_after_lost_post = wifi_disconnect_calls - disc;
+    bool rearmed = got_ip_timer->armed;
+    fire(got_ip_timer);
+    snprintf(d, sizeof d, "disconnects after the lost post=%d, IP timer armed again=%d, disconnects after the repost=%d",
+             disc_after_lost_post, rearmed, wifi_disconnect_calls - disc);
+    check("an IP timeout that cannot be queued is posted again",
+          disc_after_lost_post == 0 && rearmed && wifi_disconnect_calls - disc == 1, d);
+
+    start();
     wifi_connect_result = ESP_ERR_WIFI_CONN;
-    host_timer_fire(rt);
-    host_timer_fire(rt);
+    connect("password1");
+    fire(reconnect_timer);
     wifi_connect_result = ESP_OK;
-    wifi_event_sta_disconnected_t ev = { .reason = WIFI_REASON_NO_AP_FOUND };
-    host_timer_fire(rt);
-    wifi_event_handler(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &ev);
-    snprintf(d, sizeof d, "2 failed connect calls then 1 NO_AP_FOUND: reconnect armed=%d state=%d", rt->armed, (int)hal_wifi_get_state());
+    fire(reconnect_timer);
+    disconnected(WIFI_REASON_NO_AP_FOUND);
+    snprintf(d, sizeof d, "connect calls=%d, then 1 NO_AP_FOUND: reconnect armed=%d state=%s", wifi_connect_calls,
+             reconnect_timer->armed, state_name());
     check("one credential failure after two failed connect calls keeps new credentials retrying",
-          hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTING && rt->armed, d);
+          wifi_connect_calls == 3 && hal_wifi_get_state() == HAL_WIFI_STATE_CONNECTING && reconnect_timer->armed, d);
+
+    start();
+    connect("password1");
+    for (int i = 0; i < NEW_CREDENTIAL_FAILURES_BEFORE_GIVING_UP; i++) {
+        disconnected(WIFI_REASON_NO_AP_FOUND);
+        if (i + 1 < NEW_CREDENTIAL_FAILURES_BEFORE_GIVING_UP) {
+            fire(reconnect_timer);
+        }
+    }
+    snprintf(d, sizeof d, "connect calls=%d, after 3 NO_AP_FOUND: reconnect armed=%d state=%s", wifi_connect_calls,
+             reconnect_timer->armed, state_name());
+    check("new credentials that fail 3 times end in DISCONNECTED with no retry",
+          wifi_connect_calls == 3 && hal_wifi_get_state() == HAL_WIFI_STATE_DISCONNECTED && !reconnect_timer->armed, d);
+
+    hal_network_deinit();
     return check_summary();
 }

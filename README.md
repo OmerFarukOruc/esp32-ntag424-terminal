@@ -365,7 +365,7 @@ CI (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, and 
 
 For a `v*` tag, `build` also makes a merged binary named `esp32-ntag424-terminal-<tag>.bin` and packs the complete source including the submodule, the managed cJSON component, the resolved `sdkconfig` and a `version.txt` with the tag. The archive therefore rebuilds without network access and gives the firmware the tag as its version. `publish` adds `SHA256SUMS` and creates the GitHub release with generated notes. A tag with a hyphen, such as `v1.0.0-rc1`, becomes a pre-release.
 
-`test/host/run.sh` builds the state machine and the HAL source files for the host with AddressSanitizer and UBSan, against stand-ins for ESP-IDF, FreeRTOS and NimBLE, and runs one suite per area. It needs gcc, the OpenSSL `libcrypto` headers, and the `managed_components/` folder that `idf.py build` or `idf.py reconfigure` creates. A passing run says nothing about the PN532, the tag, or the radio, because the stand-ins answer as the code expects.
+`test/host/run.sh` builds the state machine, the BLE, network, NFC, power and button HALs, the PN532 driver wrapper and the vendored PN532 driver for the host with AddressSanitizer and UBSan, against stand-ins for ESP-IDF, FreeRTOS and NimBLE, and runs one suite per area. It needs gcc, the OpenSSL `libcrypto` headers, and the `managed_components/` folder that `idf.py build` or `idf.py reconfigure` creates. A passing run says nothing about the PN532, the tag, or the radio, because the stand-ins answer as the code expects.
 
 Agent and contributor rules are in [AGENTS.md](AGENTS.md). The checklist for testing on real hardware is [docs/hardware-test-runbook.md](docs/hardware-test-runbook.md).
 

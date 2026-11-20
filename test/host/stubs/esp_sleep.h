@@ -5,4 +5,4 @@
  */
 #pragma once
 #include "esp_err.h"
-void esp_deep_sleep_start(void);
+void esp_deep_sleep_start(void) __attribute__((noreturn));

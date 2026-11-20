@@ -7,6 +7,9 @@
 #include APP_STATE_SRC
 #include "app_platform.h"
 #include "check.h"
+#include "host.h"
+
+#define URL_SET_FAILED_CODE 1099
 
 #define SESSION_A 0x10001
 #define SESSION_B 0x20002
@@ -24,6 +27,7 @@ static void drain(void)
 static void reset(app_state_t state)
 {
     memset(&trace, 0, sizeof trace);
+    host_nvs_reset();
     vQueueDelete(s_event_queue);
     s_event_queue = xQueueCreate(EVENT_QUEUE_SIZE, sizeof(event_msg_t));
     s_state = state;
@@ -31,6 +35,12 @@ static void reset(app_state_t state)
     host_run_tasks();
     drain();
     memset(&trace, 0, sizeof trace);
+}
+
+static bool url_reply_is(bool ok, int32_t code, const char *msg)
+{
+    return trace.url_results == 1 && trace.last_url_ok == ok && trace.last_url_code == code &&
+           strcmp(trace.last_url_msg, msg) == 0;
 }
 
 static void write_wifi_config(hal_ble_session_t session, const char *ssid, const char *password, esp_err_t *ack)
@@ -89,35 +99,88 @@ int main(void)
     snprintf(d, sizeof d, "tag write started=%d, replies=%d, code=%d, msg=%s", writing, trace.url_results,
              (int)trace.last_url_code, trace.last_url_msg);
     check("URL_SET while a critical battery sleep waits is refused with low_battery",
-          !writing && trace.url_results == 1 && trace.last_url_code == 1099 && strcmp(trace.last_url_msg, "low_battery") == 0, d);
+          !writing && url_reply_is(false, URL_SET_FAILED_CODE, "low_battery"), d);
     host_run_tasks();
     drain();
 
     struct {
         const char *name;
-        int nvs_set_err, ble_set_id_err;
+        esp_err_t nvs_set_err;
+        esp_err_t nvs_commit_err;
+        esp_err_t ble_set_id_err;
         const char *msg;
     } stored[] = {
-        { "NVS save failure after a good tag write reports 1099 tag_configured_id_not_saved", 0x1105, 0, "tag_configured_id_not_saved" },
-        { "DEVICE_INFO update failure after a good tag write reports 1099 tag_configured_id_not_published", 0, 0x103, "tag_configured_id_not_published" },
-        { "a good tag write whose id is stored reports success", 0, 0, "sdm_configured" },
+        { "NVS save failure after a good tag write reports 1099 tag_configured_id_not_saved", 0x1105, ESP_OK, ESP_OK, "tag_configured_id_not_saved" },
+        { "NVS commit failure after a good tag write reports 1099 tag_configured_id_not_saved", ESP_OK, 0x1105, ESP_OK, "tag_configured_id_not_saved" },
+        { "DEVICE_INFO update failure after a good tag write reports 1099 tag_configured_id_not_published", ESP_OK, ESP_OK, 0x103, "tag_configured_id_not_published" },
     };
     for (size_t i = 0; i < sizeof stored / sizeof stored[0]; i++) {
         reset(APP_STATE_ONBOARDING_BLE);
         trace.nfc_result = HAL_NFC_OK;
         trace.nvs_set_err = stored[i].nvs_set_err;
+        trace.nvs_commit_err = stored[i].nvs_commit_err;
         trace.ble_set_id_err = stored[i].ble_set_id_err;
         url_set(SESSION_A);
         drain();
         host_run_tasks();
         drain();
-        int expect_code = strcmp(stored[i].msg, "sdm_configured") == 0 ? 0 : 1099;
         snprintf(d, sizeof d, "replies=%d ok=%d code=%d msg=%s, diagnostics code=%d", trace.url_results, trace.last_url_ok,
                  (int)trace.last_url_code, trace.last_url_msg, (int)trace.diag_result_code);
-        check(stored[i].name, trace.url_results == 1 && trace.last_url_ok == (expect_code == 0) &&
-              trace.last_url_code == expect_code && trace.diag_result_code == expect_code &&
-              strcmp(trace.last_url_msg, stored[i].msg) == 0, d);
+        check(stored[i].name, url_reply_is(false, URL_SET_FAILED_CODE, stored[i].msg) &&
+              trace.diag_result_code == URL_SET_FAILED_CODE, d);
     }
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    trace.nfc_result = HAL_NFC_OK;
+    url_set(SESSION_A);
+    drain();
+    host_run_tasks();
+    drain();
+    const char *stored_id = host_nvs_committed("dev_id");
+    char published_now[HAL_BLE_DEVICE_ID_MAX];
+    snprintf(published_now, sizeof published_now, "%s", trace.published_id);
+    trace.published_id[0] = '\0';
+    esp_err_t published = app_device_id_publish();
+    snprintf(d, sizeof d, "replies=%d ok=%d code=%d msg=%s, stored id=%s, DEVICE_INFO id=%s, after a restart=%s (%s)",
+             trace.url_results, trace.last_url_ok, (int)trace.last_url_code, trace.last_url_msg,
+             stored_id ? stored_id : "-", published_now, trace.published_id, esp_err_to_name(published));
+    check("a good tag write stores and publishes its id, and the stored id is published after a restart",
+          url_reply_is(true, 0, "sdm_configured") && trace.diag_result_code == 0 && stored_id != NULL &&
+          strcmp(stored_id, "SHOP") == 0 && strcmp(published_now, "SHOP") == 0 && published == ESP_OK &&
+          strcmp(trace.published_id, "SHOP") == 0, d);
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    trace.nfc_result = HAL_NFC_OK;
+    url_set(SESSION_A);
+    drain();
+    app_post_event(APP_EVENT_CRITICAL_BATTERY, NULL, 0);
+    drain();
+    int slept_during_write = trace.slept;
+    host_run_tasks();
+    drain();
+    snprintf(d, sizeof d, "slept during the write=%d, replies=%d ok=%d, slept after=%d", slept_during_write,
+             trace.url_results, trace.last_url_ok, trace.slept);
+    check("critical battery during a tag write sleeps after the write reports",
+          slept_during_write == 0 && trace.url_results == 1 && trace.last_url_ok && trace.slept == 1, d);
+
+    reset(APP_STATE_IDLE);
+    url_set(SESSION_A);
+    drain();
+    snprintf(d, sizeof d, "state=%s replies=%d code=%d msg=%s", s_state_names[s_state], trace.url_results,
+             (int)trace.last_url_code, trace.last_url_msg);
+    check("URL_SET after onboarding ended is refused with not_onboarding",
+          s_state == APP_STATE_IDLE && url_reply_is(false, URL_SET_FAILED_CODE, "not_onboarding"), d);
+
+    reset(APP_STATE_ONBOARDING_BLE);
+    esp_err_t first_ack;
+    write_wifi_config(SESSION_A, "FirstNet", "FIRSTPASSWORD1", &first_ack);
+    write_wifi_config(SESSION_A, "SecondNet", "SECONDPASSWORD1", &ack);
+    drain();
+    snprintf(d, sizeof d, "acks=%#x/%#x, connects=%d, ssid=%s", (unsigned)first_ack, (unsigned)ack,
+             trace.connects, trace.last_creds.ssid);
+    check("a WIFI_CONFIG written while the previous one still waits is refused and leaves the first intact",
+          first_ack == ESP_OK && ack == ESP_ERR_INVALID_STATE && trace.connects == 1 &&
+          strcmp(trace.last_creds.ssid, "FirstNet") == 0, d);
 
     reset(APP_STATE_ONBOARDING_BLE);
     write_wifi_config(SESSION_A, "HomeNet", "SECRETPASSWORD1", &ack);
@@ -174,13 +237,20 @@ int main(void)
     int same = trace.scan_sends;
     post_event(APP_EVENT_WIFI_SCAN_REQUESTED, SESSION_B, NULL, 0, 0);
     drain();
-    int other = trace.scan_sends - same;
+    int while_running = trace.scan_sends;
     host_run_tasks();
     drain();
-    snprintf(d, sizeof d, "replies while the scan ran: same session=%d, other session=%d; after the scan=%d", same, other,
-             trace.scan_sends - same - other);
-    check("while a scan runs, a request from another session gets the empty terminator and a repeat waits",
-          same == 0 && other == 1 && trace.scan_sends - same - other == 1, d);
+    const struct host_scan_send *to_b = &trace.scan[0];
+    const struct host_scan_send *to_a = &trace.scan[1];
+    snprintf(d, sizeof d, "replies while the scan ran: after the repeat=%d, after B=%d (session %#x, %zu networks); "
+             "after the scan=%d (session %#x, %zu networks, %s %d dBm ch %u %s)", same, while_running,
+             (unsigned)to_b->session, to_b->count, trace.scan_sends, (unsigned)to_a->session, to_a->count,
+             to_a->first.ssid, to_a->first.rssi, to_a->first.channel, to_a->first.security);
+    check("while a scan runs, another session gets the empty terminator, a repeat waits, and the scan answers its own session",
+          same == 0 && while_running == 1 && to_b->session == SESSION_B && to_b->count == 0 && trace.scan_sends == 2 &&
+          to_a->session == SESSION_A && to_a->count == 1 && strcmp(to_a->first.ssid, host_scan_ap.ssid) == 0 &&
+          to_a->first.rssi == host_scan_ap.rssi && to_a->first.channel == host_scan_ap.channel &&
+          strcmp(to_a->first.security, "WPA3") == 0, d);
     vQueueDelete(s_event_queue);
     return check_summary();
 }

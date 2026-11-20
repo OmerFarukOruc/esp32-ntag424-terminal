@@ -5,75 +5,80 @@
  */
 #include <setjmp.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include HAL_POWER_SRC
+#include "check.h"
 
-extern int64_t host_now_us;
+#define CRITICAL_MV 3000
+#define NORMAL_MV 4000
+#define READINGS 5
+#define MAX_CALLS 8
+
 static jmp_buf stop_jmp;
-static int sample, samples_left, cb_calls, cb_fail_left, delivered_critical;
-static const int *volts; static int nvolts;
+static const int *battery_mv;
+static int reading;
+static int calls;
+static int call_reading[MAX_CALLS];
+static int fail_left;
+static int delivered_critical;
+
 esp_err_t adc_oneshot_read(adc_oneshot_unit_handle_t h, adc_channel_t c, int *raw)
 {
-    (void)h;
-    (void)c;
-    *raw = volts[sample < nvolts ? sample : nvolts - 1] / 2;
+    if (reading == READINGS) {
+        longjmp(stop_jmp, 1);
+    }
+    *raw = battery_mv[reading] / VOLTAGE_DIVIDER_RATIO;
     return ESP_OK;
 }
+
 esp_err_t adc_cali_raw_to_voltage(adc_cali_handle_t h, int raw, int *mv)
 {
-    (void)h;
     *mv = raw;
-    sample++;
-    if (--samples_left < 0) {
-        longjmp(stop_jmp, 1);
-    } return ESP_OK;
+    reading++;
+    return ESP_OK;
 }
+
 esp_err_t adc_oneshot_new_unit(const adc_oneshot_unit_init_cfg_t *c, adc_oneshot_unit_handle_t *h)
 {
-    (void)c;
     *h = (void *)1;
     return ESP_OK;
 }
+
 esp_err_t adc_oneshot_config_channel(adc_oneshot_unit_handle_t h, adc_channel_t c, const adc_oneshot_chan_cfg_t *x)
 {
-    (void)h;
-    (void)c;
-    (void)x;
     return ESP_OK;
 }
+
 esp_err_t adc_oneshot_del_unit(adc_oneshot_unit_handle_t h)
 {
-    (void)h;
     return ESP_OK;
 }
+
 esp_err_t adc_cali_create_scheme_curve_fitting(const adc_cali_curve_fitting_config_t *c, adc_cali_handle_t *h)
 {
-    (void)c;
     *h = (void *)1;
     return ESP_OK;
 }
+
 esp_err_t adc_cali_delete_scheme_curve_fitting(adc_cali_handle_t h)
 {
-    (void)h;
     return ESP_OK;
 }
-void esp_deep_sleep_start(void) {}
-BaseType_t xTaskCreate(TaskFunction_t f, const char *n, uint32_t s, void *a, UBaseType_t p, TaskHandle_t *o)
+
+void esp_deep_sleep_start(void)
 {
-    (void)f;
-    (void)n;
-    (void)s;
-    (void)a;
-    (void)p;
-    (void)o;
-    return pdPASS;
+    abort();
 }
 
 static esp_err_t cb(hal_battery_level_t level)
 {
-    cb_calls++;
-    if (cb_fail_left > 0) {
-        cb_fail_left--;
+    if (calls < MAX_CALLS) {
+        call_reading[calls] = reading;
+    }
+    calls++;
+    if (fail_left > 0) {
+        fail_left--;
         return ESP_ERR_TIMEOUT;
     }
     if (level == HAL_BATTERY_CRITICAL) {
@@ -82,24 +87,34 @@ static esp_err_t cb(hal_battery_level_t level)
     return ESP_OK;
 }
 
-#include "check.h"
+static void monitor(const int mv[READINGS], int failures)
+{
+    battery_mv = mv;
+    reading = 0;
+    calls = 0;
+    memset(call_reading, 0, sizeof call_reading);
+    fail_left = failures;
+    delivered_critical = 0;
+    if (!setjmp(stop_jmp)) {
+        battery_monitor_task(NULL);
+    }
+}
+
 int main(void)
 {
-    char d[160];
-    static const int critical[] = { 3000 };
-    volts = critical; nvolts = 1;
+    char d[200];
+    static const int critical[READINGS] = { CRITICAL_MV, CRITICAL_MV, CRITICAL_MV, CRITICAL_MV, CRITICAL_MV };
+    static const int one_dip[READINGS] = { CRITICAL_MV, NORMAL_MV, NORMAL_MV, NORMAL_MV, NORMAL_MV };
     hal_power_register_low_battery_cb(cb);
-    sample = 0; samples_left = 5 * ADC_SAMPLES; cb_calls = 0; cb_fail_left = 1; delivered_critical = 0;
-    if (!setjmp(stop_jmp)) {
-        battery_monitor_task(NULL);
-    }
-    snprintf(d, sizeof d, "5 critical readings, first delivery fails: callback calls=%d, critical delivered=%d", cb_calls, delivered_critical);
-    check("a critical level whose delivery failed is delivered on the next reading", delivered_critical == 1, d);
-    sample = 0; samples_left = 5 * ADC_SAMPLES; cb_calls = 0; cb_fail_left = 0; delivered_critical = 0;
-    if (!setjmp(stop_jmp)) {
-        battery_monitor_task(NULL);
-    }
-    snprintf(d, sizeof d, "callback calls=%d, critical delivered=%d", cb_calls, delivered_critical);
-    check("a delivered critical level is sent once", cb_calls == 1 && delivered_critical == 1, d);
+
+    monitor(critical, 1);
+    snprintf(d, sizeof d, "5 critical readings, first delivery fails: calls on readings %d and %d of %d, %d calls, "
+             "critical delivered=%d", call_reading[0], call_reading[1], reading, calls, delivered_critical);
+    check("a critical level is offered on the 2nd critical reading, again on the next after a failed delivery, then never",
+          calls == 2 && call_reading[0] == 2 && call_reading[1] == 3 && delivered_critical == 1, d);
+
+    monitor(one_dip, 0);
+    snprintf(d, sizeof d, "1 critical reading, then 4 normal: %d calls", calls);
+    check("a single critical reading is not reported", calls == 0, d);
     return check_summary();
 }

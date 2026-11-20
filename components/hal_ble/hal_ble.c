@@ -218,9 +218,6 @@ static void wiping_free(void *ptr)
 static const char *json_text_problem(const char *text, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
-        if (text[i] == '\0') {
-            return "a NUL character";
-        }
         if ((unsigned char)text[i] < 0x20 && text[i] != '\t' && text[i] != '\n' && text[i] != '\r') {
             return "a control character";
         }

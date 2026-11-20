@@ -59,7 +59,6 @@ esp_err_t esp_wifi_disconnect(void);
 esp_err_t esp_wifi_set_config(wifi_interface_t i, wifi_config_t *c);
 esp_err_t esp_wifi_get_config(wifi_interface_t i, wifi_config_t *c);
 esp_err_t esp_wifi_scan_start(const wifi_scan_config_t *c, bool block);
-esp_err_t esp_wifi_scan_stop(void);
 esp_err_t esp_wifi_scan_get_ap_records(uint16_t *n, wifi_ap_record_t *r);
 esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *r);
 #define WIFI_REASON_UNSPECIFIED 1

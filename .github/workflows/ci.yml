@@ -121,6 +121,8 @@ jobs:
       # The BLE suite compiles the managed cJSON component that dependencies.lock pins.
       - name: Resolve the managed components
         run: . "$IDF_PATH/export.sh" && idf.py reconfigure
+      - name: Check that the reconfigure left dependencies.lock unchanged
+        run: git diff --exit-code dependencies.lock
       - run: test/host/run.sh
 
   # The default build compiles one side of each #if CONFIG_HAL_*; each

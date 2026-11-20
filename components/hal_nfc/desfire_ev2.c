@@ -384,7 +384,7 @@ hal_nfc_err_t nfc_ev2_change_file_settings(uint8_t file_no, const uint8_t *setti
                       HAL_NFC_ERR_COMM, fail, TAG, "Command MAC failed");
     cmac_truncate(full_mac, &cmd_data[1 + padded_len]);
 
-    uint8_t response[CMD_MAC_LEN];
+    uint8_t response[CMD_MAC_LEN] = {0};
     size_t resp_len = sizeof(response);
     ret = desfire_send_cmd(DESFIRE_INS_CHANGE_FILE_SETTINGS, cmd_data, 1 + padded_len + CMD_MAC_LEN,
                            DESFIRE_STATUS_OK, response, &resp_len);
