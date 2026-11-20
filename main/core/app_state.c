@@ -30,7 +30,7 @@
 static const char *TAG = "app_state";
 
 #define EVENT_QUEUE_SIZE            32
-#define EVENT_DATA_MAX              128
+#define EVENT_DATA_MAX              HAL_BLE_DEVICE_ID_MAX
 #define STATE_TASK_STACK            8192
 #define STATE_TASK_PRIORITY         5
 #define STATE_TASK_POLL_MS          5000
@@ -55,7 +55,6 @@ typedef struct {
     uint8_t data[EVENT_DATA_MAX];
 } event_msg_t;
 
-_Static_assert(EVENT_DATA_MAX >= sizeof(hal_ble_wifi_config_t), "event data must hold a WiFi config");
 _Static_assert(EVENT_DATA_MAX >= HAL_BLE_DEVICE_ID_MAX, "event data must hold a device id");
 _Static_assert(EVENT_DATA_MAX >= sizeof(hal_nfc_err_t), "event data must hold a tag write result");
 _Static_assert(APP_STATE_COUNT <= UINT8_MAX && APP_EVENT_COUNT <= UINT8_MAX,
@@ -126,9 +125,49 @@ static esp_err_t post_event(app_event_t event, hal_ble_session_t session, const 
         ret = ESP_ERR_TIMEOUT;
     }
 
-    /* The data can hold WiFi credentials. */
-    explicit_bzero(&msg, sizeof(msg));
     return ret;
+}
+
+/* WiFi credentials skip the event queue, because a FreeRTOS queue keeps a copy of each item in its
+ * storage after xQueueReceive(). One slot holds the credentials until the state task takes them. */
+static struct {
+    portMUX_TYPE lock;
+    bool full;
+    hal_ble_wifi_config_t config;
+} s_wifi_slot = {.lock = portMUX_INITIALIZER_UNLOCKED};
+
+/** Copies the waiting credentials into out, when not NULL, and wipes the slot. False when it was empty. */
+static bool take_wifi_config(hal_ble_wifi_config_t *out)
+{
+    taskENTER_CRITICAL(&s_wifi_slot.lock);
+    bool full = s_wifi_slot.full;
+    if (full && out != NULL) {
+        *out = s_wifi_slot.config;
+    }
+    explicit_bzero(&s_wifi_slot.config, sizeof(s_wifi_slot.config));
+    s_wifi_slot.full = false;
+    taskEXIT_CRITICAL(&s_wifi_slot.lock);
+    return full;
+}
+
+static esp_err_t post_wifi_config(hal_ble_session_t session, const void *data, size_t data_len)
+{
+    ESP_RETURN_ON_FALSE(data_len == sizeof(hal_ble_wifi_config_t), ESP_ERR_INVALID_SIZE, TAG,
+                        "WiFi config of unexpected size %u", (unsigned)data_len);
+    taskENTER_CRITICAL(&s_wifi_slot.lock);
+    bool busy = s_wifi_slot.full;
+    if (!busy) {
+        memcpy(&s_wifi_slot.config, data, data_len);
+        s_wifi_slot.full = true;
+    }
+    taskEXIT_CRITICAL(&s_wifi_slot.lock);
+    ESP_RETURN_ON_FALSE(!busy, ESP_ERR_INVALID_STATE, TAG, "The previous WiFi config is still waiting");
+
+    esp_err_t err = post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, session, NULL, 0, 0);
+    if (err != ESP_OK) {
+        take_wifi_config(NULL);
+    }
+    return err;
 }
 
 esp_err_t app_post_event(app_event_t event, const void *data, size_t data_len)
@@ -186,7 +225,7 @@ static esp_err_t ble_event_callback(hal_ble_event_t event, hal_ble_session_t ses
     case HAL_BLE_EVENT_WIFI_SCAN_REQ:
         return post_event(APP_EVENT_WIFI_SCAN_REQUESTED, session, NULL, 0, 0);
     case HAL_BLE_EVENT_WIFI_CONFIG:
-        return post_event(APP_EVENT_WIFI_CONFIG_RECEIVED, session, data, data_len, 0);
+        return post_wifi_config(session, data, data_len);
     case HAL_BLE_EVENT_URL_SET:
         return post_event(APP_EVENT_URL_SET, session, data, data_len, 0);
     }
@@ -334,19 +373,20 @@ static void send_wifi_result(hal_ble_session_t session, bool success)
                                     success ? "WiFi connected successfully" : "WiFi connection failed");
 }
 
-static void handle_wifi_config(hal_ble_session_t session, const void *data, size_t data_len)
+static void handle_wifi_config(hal_ble_session_t session)
 {
-    if (data_len != sizeof(hal_ble_wifi_config_t)) {
-        ESP_LOGW(TAG, "WiFi config ignored: unexpected size %u", (unsigned)data_len);
+    hal_ble_wifi_config_t config;
+    if (!take_wifi_config(&config)) {
+        ESP_LOGW(TAG, "WiFi config event without credentials");
         return;
     }
 
-    const hal_ble_wifi_config_t *config = data;
     hal_wifi_credentials_t creds = {0};
-    _Static_assert(sizeof(creds.ssid) == sizeof(config->ssid) && sizeof(creds.password) == sizeof(config->password),
+    _Static_assert(sizeof(creds.ssid) == sizeof(config.ssid) && sizeof(creds.password) == sizeof(config.password),
                    "BLE and network credentials must have the same layout");
-    memcpy(creds.ssid, config->ssid, sizeof(creds.ssid));
-    memcpy(creds.password, config->password, sizeof(creds.password));
+    memcpy(creds.ssid, config.ssid, sizeof(creds.ssid));
+    memcpy(creds.password, config.password, sizeof(creds.password));
+    explicit_bzero(&config, sizeof(config));
 
     esp_err_t err = hal_wifi_connect(&creds);
     explicit_bzero(&creds, sizeof(creds));
@@ -404,7 +444,7 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
             transition_to(APP_STATE_IDLE, event);
             break;
         case APP_EVENT_WIFI_CONFIG_RECEIVED:
-            handle_wifi_config(session, data, data_len);
+            handle_wifi_config(session);
             break;
         case APP_EVENT_WIFI_SCAN_REQUESTED:
             app_wifi_scan_start(session);
@@ -465,7 +505,7 @@ static void handle_state_event(app_event_t event, hal_ble_session_t session, con
     }
 }
 
-static void handle_event(const event_msg_t *msg)
+static void dispatch_event(const event_msg_t *msg)
 {
     ESP_LOGD(TAG, "Event %s in state %s", s_event_names[msg->event], s_state_names[s_state]);
 
@@ -524,6 +564,14 @@ static void handle_event(const event_msg_t *msg)
     handle_state_event(msg->event, msg->session, msg->data, msg->data_len);
 }
 
+static void handle_event(const event_msg_t *msg)
+{
+    dispatch_event(msg);
+    if (msg->event == APP_EVENT_WIFI_CONFIG_RECEIVED) {
+        take_wifi_config(NULL);
+    }
+}
+
 static void state_machine_task(void *arg)
 {
     (void)arg;
@@ -537,7 +585,6 @@ static void state_machine_task(void *arg)
     while (1) {
         if (xQueueReceive(s_event_queue, &msg, pdMS_TO_TICKS(STATE_TASK_POLL_MS)) == pdTRUE) {
             handle_event(&msg);
-            explicit_bzero(&msg, sizeof(msg));
 
             /* A tag write must end through URL_SET_DONE, so the alarm waits for it. */
             if (s_state != APP_STATE_WRITING_TAG && atomic_exchange(&s_overflow_alarm, false)) {

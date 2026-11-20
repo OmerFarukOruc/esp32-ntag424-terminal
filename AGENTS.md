@@ -32,7 +32,7 @@ Hardware behaviour cannot be checked in CI. Mark a claim about the PN532, the ta
 - The NimBLE host task, the system event task, `esp_timer` callbacks, the battery monitor, and the button task must return quickly. Do not wait on a queue, take a mutex, or sleep in them.
 - A callback only posts to the state task queue with `app_post_event()`, which does not wait. The state task owns the state, the LED pattern, and the WIFI_CONFIG and URL_SET replies. Slow work runs in its own task. The tag write task reports back with `APP_EVENT_URL_SET_DONE`, which it posts with `app_post_event_wait()`. The WiFi scan task sends its BLE notifications itself and then reports with `APP_EVENT_WIFI_SCAN_DONE`. The state task stops the radios only while neither task runs.
 - The task watchdog is 10 s with panic on, and it watches the idle tasks on both cores. No loop or wait may keep a task off the CPU near 10 s. The state task subscribes to the watchdog and resets it in its loop.
-- Wipe credentials with `explicit_bzero()` as soon as the last reader is done. WiFi credentials pass through BLE writes, the event queue, and the connect call.
+- Wipe credentials with `explicit_bzero()` as soon as the last reader is done. WiFi credentials pass through BLE writes, the WiFi config slot in `main/core/app_state.c`, and the connect call. Keep them out of FreeRTOS queues, because a queue keeps a copy of each item in its storage after `xQueueReceive()`.
 - Log with the file's `TAG` at a level that fits. DEBUG strings are not compiled in at the default level.
 
 ## PN532 and tag learnings

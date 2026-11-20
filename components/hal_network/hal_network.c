@@ -417,9 +417,11 @@ esp_err_t hal_wifi_connect(const hal_wifi_credentials_t *credentials)
     ESP_GOTO_ON_ERROR(esp_wifi_start(), fail, TAG, "WiFi start failed");
 
     ESP_LOGI(TAG, "Connecting to SSID: %s", credentials->ssid);
+    explicit_bzero(&wifi_config, sizeof(wifi_config));
     return ESP_OK;
 
 fail:
+    explicit_bzero(&wifi_config, sizeof(wifi_config));
     s_network.auto_reconnect = false;
     set_state(HAL_WIFI_STATE_DISCONNECTED);
     return ret;
