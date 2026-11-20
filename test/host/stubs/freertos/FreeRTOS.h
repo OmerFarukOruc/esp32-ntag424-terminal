@@ -22,8 +22,9 @@ typedef struct {
     int unused;
 } portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED {0}
-#define portENTER_CRITICAL(m) ((void)(m))
-#define portEXIT_CRITICAL(m) ((void)(m))
+extern int host_crit_depth;
+#define portENTER_CRITICAL(m) ((void)(m), host_crit_depth++)
+#define portEXIT_CRITICAL(m) ((void)(m), host_crit_depth--)
 #define IRAM_ATTR
 typedef void *TaskHandle_t;
 typedef void *QueueHandle_t;

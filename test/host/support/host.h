@@ -21,7 +21,18 @@ struct host_timer {
     bool used;
     bool armed;
     bool periodic;
+    uint64_t delay_us;
+    int64_t due_us;
 };
+extern int host_crit_depth;
+extern int host_timer_start_fails;
+extern esp_err_t host_timer_start_error;
+extern int host_timer_delete_fails;
+extern const char *host_timer_stop_hook_name;
+extern void (*host_timer_stop_hook)(void);
+extern void (*host_timer_fired_hook)(void);
+void host_advance(int64_t us);
+extern TickType_t host_queue_last_wait;
 struct host_timer *host_timer_named(const char *name);
 bool host_timer_fire(struct host_timer *t);
 
@@ -39,8 +50,20 @@ extern int wifi_disconnect_calls;
 extern esp_err_t wifi_connect_result;
 extern esp_err_t wifi_disconnect_result;
 extern esp_err_t wifi_stop_result;
+extern esp_err_t wifi_start_result;
 extern esp_err_t wifi_deinit_result;
 extern int host_event_post_fails;
+extern int wifi_stop_calls;
+extern int wifi_set_config_calls;
+extern int wifi_start_calls;
+extern int wifi_scan_calls;
+extern int wifi_calls_in_critical;
+extern int wifi_overlapping_calls;
+extern const char *host_wifi_hook_call;
+extern void (*host_wifi_hook)(void);
+void host_wifi_link_up(const char *ssid, uint32_t ip);
+void host_wifi_link_down(void);
+void host_wifi_forget_config(void);
 
 #define HOST_NOTIFY_MAX 16
 #define HOST_NOTIFY_LEN 600

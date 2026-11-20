@@ -16,6 +16,14 @@
 #define MAX_TASKS 16
 
 int64_t host_now_us;
+int host_crit_depth;
+int host_timer_start_fails;
+esp_err_t host_timer_start_error = ESP_FAIL;
+int host_timer_delete_fails;
+void (*host_timer_fired_hook)(void);
+const char *host_timer_stop_hook_name;
+void (*host_timer_stop_hook)(void);
+TickType_t host_queue_last_wait;
 bool host_in_host;
 bool host_blocked_in_host;
 void (*host_on_block)(void);
@@ -146,6 +154,7 @@ BaseType_t xQueueSend(QueueHandle_t h, const void *item, TickType_t wait)
 BaseType_t xQueueReceive(QueueHandle_t h, void *item, TickType_t wait)
 {
     struct queue *q = h;
+    host_queue_last_wait = wait;
     if (q->count == 0) {
         return pdFALSE;
     }
@@ -273,7 +282,7 @@ esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle
     return ESP_ERR_NO_MEM;
 }
 
-static esp_err_t timer_start(esp_timer_handle_t t, bool periodic)
+static esp_err_t timer_start(esp_timer_handle_t t, uint64_t us, bool periodic)
 {
     if (t == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -281,19 +290,25 @@ static esp_err_t timer_start(esp_timer_handle_t t, bool periodic)
     if (t->armed) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (host_timer_start_fails > 0) {
+        host_timer_start_fails--;
+        return host_timer_start_error;
+    }
     t->armed = true;
     t->periodic = periodic;
+    t->delay_us = us;
+    t->due_us = host_now_us + (int64_t)us;
     return ESP_OK;
 }
 
 esp_err_t esp_timer_start_once(esp_timer_handle_t t, uint64_t us)
 {
-    return timer_start(t, false);
+    return timer_start(t, us, false);
 }
 
 esp_err_t esp_timer_start_periodic(esp_timer_handle_t t, uint64_t us)
 {
-    return timer_start(t, true);
+    return timer_start(t, us, true);
 }
 
 esp_err_t esp_timer_stop(esp_timer_handle_t t)
@@ -308,12 +323,27 @@ esp_err_t esp_timer_stop(esp_timer_handle_t t)
     return ESP_OK;
 }
 
+esp_err_t esp_timer_stop_blocking(esp_timer_handle_t t, uint32_t timeout_ticks)
+{
+    if (t == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    t->armed = false;
+    if (host_timer_stop_hook != NULL && strcmp(t->args.name, host_timer_stop_hook_name) == 0) {
+        void (*hook)(void) = host_timer_stop_hook;
+        host_timer_stop_hook = NULL;
+        hook();
+    }
+    return ESP_OK;
+}
+
 esp_err_t esp_timer_delete(esp_timer_handle_t t)
 {
     if (t == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (t->armed) {
+    if (t->armed || host_timer_delete_fails > 0) {
+        host_timer_delete_fails -= host_timer_delete_fails > 0;
         return ESP_ERR_INVALID_STATE;
     }
     t->used = false;
@@ -340,4 +370,29 @@ bool host_timer_fire(struct host_timer *t)
     }
     t->args.callback(t->args.arg);
     return true;
+}
+
+void host_advance(int64_t us)
+{
+    int64_t target = host_now_us + us;
+    for (;;) {
+        struct host_timer *next = NULL;
+        for (int i = 0; i < MAX_TIMERS; i++) {
+            if (timers[i].used && timers[i].armed && timers[i].due_us <= target &&
+                    (next == NULL || timers[i].due_us < next->due_us)) {
+                next = &timers[i];
+            }
+        }
+        if (next == NULL) {
+            break;
+        }
+        if (next->due_us > host_now_us) {
+            host_now_us = next->due_us;
+        }
+        host_timer_fire(next);
+        if (host_timer_fired_hook != NULL) {
+            host_timer_fired_hook();
+        }
+    }
+    host_now_us = target;
 }

@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <stdio.h>
 #include <string.h>
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -21,10 +22,26 @@ int wifi_disconnect_calls;
 esp_err_t wifi_connect_result;
 esp_err_t wifi_disconnect_result;
 int host_event_post_fails;
+int wifi_stop_calls;
+int wifi_set_config_calls;
+int wifi_start_calls;
+int wifi_scan_calls;
+int wifi_calls_in_critical;
+int wifi_overlapping_calls;
+const char *host_wifi_hook_call;
+void (*host_wifi_hook)(void);
+
+static struct {
+    bool up;
+    char ssid[33];
+    uint32_t ip;
+} live;
+static int calls_active;
 
 static wifi_config_t saved_config;
 static bool started;
 esp_err_t wifi_stop_result;
+esp_err_t wifi_start_result;
 esp_err_t wifi_deinit_result;
 
 static struct handler {
@@ -42,13 +59,66 @@ static struct {
 } pending[MAX_PENDING];
 static int pending_count;
 
+void host_wifi_link_up(const char *ssid, uint32_t ip)
+{
+    live.up = true;
+    snprintf(live.ssid, sizeof live.ssid, "%s", ssid);
+    live.ip = ip;
+}
+
+void host_wifi_link_down(void)
+{
+    live.up = false;
+}
+
+void host_wifi_forget_config(void)
+{
+    memset(&saved_config, 0, sizeof saved_config);
+}
+
+static void enter(void)
+{
+    wifi_calls_in_critical += host_crit_depth != 0;
+    wifi_overlapping_calls += calls_active != 0;
+    calls_active++;
+}
+
+static void midpoint(const char *call)
+{
+    if (host_wifi_hook != NULL && strcmp(host_wifi_hook_call, call) == 0) {
+        void (*hook)(void) = host_wifi_hook;
+        host_wifi_hook = NULL;
+        hook();
+    }
+}
+
+static void leave(void)
+{
+    calls_active--;
+}
+
 void host_wifi_reset(void)
 {
     wifi_connect_calls = 0;
     wifi_disconnect_calls = 0;
+    wifi_stop_calls = 0;
+    wifi_set_config_calls = 0;
+    wifi_start_calls = 0;
+    wifi_scan_calls = 0;
+    wifi_calls_in_critical = 0;
+    wifi_overlapping_calls = 0;
+    host_wifi_hook = NULL;
+    host_timer_start_fails = 0;
+    host_timer_start_error = ESP_FAIL;
+    host_timer_delete_fails = 0;
+    host_timer_stop_hook = NULL;
+    host_timer_fired_hook = host_event_loop_run;
+    memset(&live, 0, sizeof live);
+    calls_active = 0;
     wifi_connect_result = ESP_OK;
     wifi_disconnect_result = ESP_OK;
     wifi_stop_result = ESP_OK;
+    wifi_start_result = ESP_OK;
     wifi_deinit_result = ESP_OK;
     host_event_post_fails = 0;
     memset(&saved_config, 0, sizeof saved_config);
@@ -119,6 +189,18 @@ esp_err_t esp_netif_init(void)
     return ESP_OK;
 }
 
+esp_err_t esp_netif_get_ip_info(esp_netif_t *n, esp_netif_ip_info_t *info)
+{
+    wifi_calls_in_critical += host_crit_depth != 0;
+    if (n == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(info, 0, sizeof * info);
+    info->ip.addr = live.ip;
+    midpoint("esp_netif_get_ip_info");
+    return ESP_OK;
+}
+
 static int netif;
 
 esp_netif_t *esp_netif_create_default_wifi_sta(void)
@@ -147,54 +229,83 @@ esp_err_t esp_wifi_set_mode(wifi_mode_t m)
 
 esp_err_t esp_wifi_start(void)
 {
-    if (!started) {
+    enter();
+    wifi_start_calls++;
+    if (wifi_start_result == ESP_OK && !started) {
         started = true;
         esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_START, NULL, 0, 0);
     }
-    return ESP_OK;
+    midpoint("esp_wifi_start");
+    leave();
+    return wifi_start_result;
 }
 
 esp_err_t esp_wifi_stop(void)
 {
+    enter();
+    midpoint("esp_wifi_stop");
+    wifi_stop_calls++;
+    esp_err_t err = ESP_OK;
     if (wifi_stop_result != ESP_OK) {
-        return wifi_stop_result;
-    }
-    if (started) {
+        err = wifi_stop_result;
+    } else if (started) {
         started = false;
+        live.up = false;
         esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_STOP, NULL, 0, 0);
     }
-    return ESP_OK;
+    leave();
+    return err;
 }
 
 esp_err_t esp_wifi_connect(void)
 {
+    enter();
+    midpoint("esp_wifi_connect");
     wifi_connect_calls++;
+    leave();
     return wifi_connect_result;
 }
 
 esp_err_t esp_wifi_disconnect(void)
 {
+    enter();
+    midpoint("esp_wifi_disconnect");
     wifi_disconnect_calls++;
+    esp_err_t err = started ? ESP_OK : ESP_ERR_WIFI_NOT_STARTED;
     if (wifi_disconnect_result != ESP_OK) {
-        return wifi_disconnect_result;
+        err = wifi_disconnect_result;
+    } else if (live.up) {
+        live.up = false;
+        wifi_event_sta_disconnected_t ev = { .reason = WIFI_REASON_ASSOC_LEAVE };
+        esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &ev, sizeof ev, 0);
     }
-    return started ? ESP_OK : ESP_ERR_WIFI_NOT_STARTED;
+    leave();
+    return err;
 }
 
 esp_err_t esp_wifi_set_config(wifi_interface_t i, wifi_config_t *c)
 {
+    enter();
+    midpoint("esp_wifi_set_config");
+    wifi_set_config_calls++;
     saved_config = *c;
+    leave();
     return ESP_OK;
 }
 
 esp_err_t esp_wifi_get_config(wifi_interface_t i, wifi_config_t *c)
 {
+    wifi_calls_in_critical += host_crit_depth != 0;
     *c = saved_config;
     return ESP_OK;
 }
 
 esp_err_t esp_wifi_scan_start(const wifi_scan_config_t *c, bool block)
 {
+    enter();
+    midpoint("esp_wifi_scan_start");
+    wifi_scan_calls++;
+    leave();
     return ESP_OK;
 }
 
@@ -206,5 +317,8 @@ esp_err_t esp_wifi_scan_get_ap_records(uint16_t *n, wifi_ap_record_t *r)
 
 esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *r)
 {
-    return ESP_ERR_WIFI_NOT_STARTED;
+    wifi_calls_in_critical += host_crit_depth != 0;
+    memset(r, 0, sizeof * r);
+    memcpy(r->ssid, live.ssid, sizeof r->ssid);
+    return live.up ? ESP_OK : ESP_ERR_WIFI_NOT_CONNECT;
 }

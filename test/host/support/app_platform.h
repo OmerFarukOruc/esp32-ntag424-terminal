@@ -36,6 +36,12 @@ struct host_trace {
     bool ble_used_after_deinit;
     int wifi_results;
     bool last_wifi_ok;
+    hal_ble_session_t last_wifi_session;
+    hal_wifi_attempt_id_t attempt_last;
+    hal_wifi_attempt_id_t attempt;
+    hal_wifi_attempt_status_t attempt_status;
+    hal_wifi_attempt_id_t last_cancelled;
+    hal_wifi_event_cb_t wifi_cb;
     int url_results;
     bool last_url_ok;
     int32_t last_url_code;
@@ -57,4 +63,5 @@ extern jmp_buf host_sleep_jmp;
 extern const hal_wifi_ap_t host_scan_ap;
 
 void host_nvs_reset(void);
+void host_wifi_finish(bool success);
 const char *host_nvs_committed(const char *key);
