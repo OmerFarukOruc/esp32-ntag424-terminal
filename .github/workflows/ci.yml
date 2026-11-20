@@ -163,6 +163,8 @@ jobs:
       - name: Check that the reconfigure left dependencies.lock unchanged
         run: git diff --exit-code dependencies.lock
       - run: test/host/run.sh
+      - name: Check the README verifier
+        run: . "$IDF_PATH/export.sh" && python test/host/test_readme_verifier.py
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
