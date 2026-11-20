@@ -607,9 +607,9 @@ static esp_err_t init_ble(void)
 }
 
 #if CONFIG_HAL_POWER_BATTERY_MONITOR
-static void battery_callback(hal_battery_level_t level)
+static esp_err_t battery_callback(hal_battery_level_t level)
 {
-    app_post_event(level == HAL_BATTERY_CRITICAL ? APP_EVENT_CRITICAL_BATTERY : APP_EVENT_LOW_BATTERY, NULL, 0);
+    return app_post_event(level == HAL_BATTERY_CRITICAL ? APP_EVENT_CRITICAL_BATTERY : APP_EVENT_LOW_BATTERY, NULL, 0);
 }
 
 static esp_err_t init_power(void)
