@@ -163,7 +163,8 @@ The device returns `0x0D` in these cases.
 
 The device returns `0x13` in these cases.
 
-- The write is not valid JSON.
+- The write is not one JSON value with only whitespace after it.
+- The write holds a NUL character, raw or as the escape `\u0000`.
 - WIFI_CONFIG has no `ssid`, or an `ssid` or a `password` that is not a string.
 - URL_SET has no `deviceId`, or one that is not a string.
 
@@ -205,7 +206,7 @@ Write the credentials:
 {"ssid":"MyNetwork","password":"secret"}
 ```
 
-The `ssid` is 1 to 32 bytes. The `password` is empty or 8 to 64 bytes (64 bytes means a hex key). Leave it empty or omit it for an open network. A password of 1 to 7 bytes gets the failure notification at once, and the current connection stays up. With a password, the device joins only WPA2 and WPA3 networks, not WEP or WPA-only ones. After the connect attempt, the device sends one notification:
+The `ssid` is 1 to 32 bytes. The `password` is empty or 8 to 64 bytes. A 64-byte password is the key itself and must be 64 hex digits. Leave it empty or omit it for an open network. A password of 1 to 7 bytes, or a 64-byte password with a character that is not a hex digit, gets the failure notification at once, and the current connection stays up. With a password, the device joins only WPA2 and WPA3 networks, not WEP or WPA-only ones. After the connect attempt, the device sends one notification:
 
 ```json
 {"success":true,"ip":"","msg":"WiFi connected successfully"}

@@ -10,6 +10,7 @@
  */
 
 #include "hal_network.h"
+#include <ctype.h>
 #include <stdatomic.h>
 #include "esp_check.h"
 #include "esp_event.h"
@@ -118,6 +119,16 @@ static esp_err_t read_saved_ssid(char ssid[33])
     }
     explicit_bzero(&saved, sizeof(saved));
     return err;
+}
+
+static bool all_hex(const char *text, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (!isxdigit((unsigned char)text[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void reconnect_timer_callback(void *arg)
@@ -325,6 +336,8 @@ esp_err_t hal_wifi_connect(const hal_wifi_credentials_t *credentials)
     /* WPA2 needs 8 to 63 characters or a 64-digit hex key; check before the old connection stops. */
     ESP_RETURN_ON_FALSE(password_len == 0 || (password_len >= 8 && password_len <= sizeof(wifi_config.sta.password)),
                         ESP_ERR_INVALID_ARG, TAG, "Password must be empty or 8 to 64 bytes");
+    ESP_RETURN_ON_FALSE(password_len < sizeof(wifi_config.sta.password) || all_hex(credentials->password, password_len),
+                        ESP_ERR_INVALID_ARG, TAG, "A 64-byte password must be 64 hex digits");
     memcpy(wifi_config.sta.ssid, credentials->ssid, ssid_len);
     memcpy(wifi_config.sta.password, credentials->password, password_len);
     /* The driver defaults to WPA2 for a password of 8 or more characters. Setting it also makes the

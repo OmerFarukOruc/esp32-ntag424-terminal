@@ -42,10 +42,11 @@
  * fails with ATT error 0x0D (Invalid Attribute Value Length). So does a
  * WIFI_CONFIG with an empty SSID, an SSID over 32 bytes or a password over 64
  * bytes, and a URL_SET with an empty deviceId or one over 31 bytes. A write
- * that is not valid JSON, or lacks a string "ssid" (WIFI_CONFIG) or
- * "deviceId" (URL_SET), or has a "password" that is not a string, fails with
- * ATT error 0x13 (Value Not Allowed). A WIFI_CONFIG without "password"
- * selects an open network.
+ * that is not one JSON value with only whitespace after it, holds a NUL
+ * character (raw or as the escape \u0000), lacks a string "ssid"
+ * (WIFI_CONFIG) or "deviceId" (URL_SET), or has a "password" that is not a
+ * string, fails with ATT error 0x13 (Value Not Allowed). A WIFI_CONFIG
+ * without "password" selects an open network.
  *
  * The advertised name is "TERMINAL-XXXX" with the last two Bluetooth MAC bytes
  * in hex, for example "TERMINAL-84F2". The advertising interval is 100 ms.

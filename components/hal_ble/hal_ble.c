@@ -155,8 +155,27 @@ static esp_err_t nimble_to_esp(int rc)
     }
 }
 
-/* Reads a write into a stack buffer that is wiped before return, and parses it.
- * Returns 0 or an ATT error code. */
+/* cJSON hands out strings that end at the first NUL, so a raw NUL or a \u0000 escape would make the
+ * value read differ from the value sent. */
+static bool has_nul(const char *text, size_t len)
+{
+    if (memchr(text, '\0', len) != NULL) {
+        return true;
+    }
+    for (size_t i = 0; i + 1 < len; i++) {
+        if (text[i] != '\\') {
+            continue;
+        }
+        if (text[i + 1] == 'u' && i + 5 < len && memcmp(&text[i + 2], "0000", 4) == 0) {
+            return true;
+        }
+        i++;
+    }
+    return false;
+}
+
+/* Reads a write into a stack buffer that is wiped before return, and parses it. The write must be one
+ * JSON value with nothing but whitespace after it. Returns 0 or an ATT error code. */
 static int parse_json_write(struct os_mbuf *om, cJSON **json)
 {
     char buf[WRITE_MAX_LEN + 1];
@@ -168,11 +187,14 @@ static int parse_json_write(struct os_mbuf *om, cJSON **json)
         att = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     } else if (ble_hs_mbuf_to_flat(om, buf, WRITE_MAX_LEN, &copied) != 0) {
         att = BLE_ATT_ERR_UNLIKELY;
+    } else if (has_nul(buf, copied)) {
+        ESP_LOGW(TAG, "Write holds a NUL character");
+        att = BLE_ATT_ERR_VALUE_NOT_ALLOWED;
     } else {
         buf[copied] = '\0';
-        *json = cJSON_Parse(buf);
+        *json = cJSON_ParseWithOpts(buf, NULL, true);
         if (*json == NULL) {
-            ESP_LOGW(TAG, "Write is not valid JSON (%u bytes)", (unsigned)copied);
+            ESP_LOGW(TAG, "Write is not one JSON value (%u bytes)", (unsigned)copied);
             att = BLE_ATT_ERR_VALUE_NOT_ALLOWED;
         }
     }

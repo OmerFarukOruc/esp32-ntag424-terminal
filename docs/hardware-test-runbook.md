@@ -191,7 +191,9 @@ Expect `hal_ble: BLE connected, conn_handle=<n>`, `MTU update: conn_handle=<n>, 
 | Write before pairing | ATT error `0x05` for a phone with no bond, `0x0F` for a phone with a bond the device kept | [ ] |
 | Pairing | Just Works, no passkey prompt | [ ] |
 | Write after pairing | Accepted | [ ] |
-| Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not valid JSON (<n> bytes)` | [ ] |
+| Invalid JSON | A write of `abc` to WIFI_CONFIG or URL_SET fails with ATT error `0x13`, and the log shows `Write is not one JSON value (<n> bytes)` | [ ] |
+| Bytes after the JSON | `{"deviceId":"SHOP"} x` to URL_SET fails with ATT error `0x13` and the same log line | [ ] |
+| NUL character | `{"deviceId":"SHOP\u0000X"}` to URL_SET fails with ATT error `0x13`, log `Write holds a NUL character` | [ ] |
 | Missing field | `{"x":1}` to URL_SET fails with ATT error `0x13` and `URL_SET needs a string deviceId` | [ ] |
 | No notifications | With notifications off on a characteristic, the write is accepted, no reply arrives, and the log shows `Client has not enabled notifications on this characteristic` | [ ] |
 | Pairing failure | `Encryption failed, terminating connection` and a disconnect | [ ] |
@@ -310,6 +312,7 @@ The `BLE advertising stopped` line comes from the BLE host task, so it can appea
 | Empty `ssid` | ATT error `0x0D`, log `Invalid WiFi config: ssid 0 bytes, password <n> bytes` | [ ] |
 | `ssid` over 32 bytes or `password` over 64 bytes | ATT error `0x0D` | [ ] |
 | Missing `ssid`, or a `password` that is not a string | ATT error `0x13`, log `WiFi config needs a string ssid and, when present, a string password` | [ ] |
+| 64-byte password that is not hex | A failure notification at once, log `A 64-byte password must be 64 hex digits`, and the current connection stays up | [ ] |
 | Short press while connecting | Returns to IDLE and the connection continues. The LED pulses blue until the press, then blinks brown until the link is up. | [ ] |
 
 #### Wrong password
